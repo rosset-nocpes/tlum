@@ -1,0 +1,102 @@
+/*
+ * tlum's built-in style. Your ~/.config/tlum/style.css cascades over it: copy only what
+ * you want to change (`tlum style --init` starts you off with this whole file). Saving the
+ * file restyles the popover at once; `tlum style` checks it for mistakes.
+ *
+ * Every part is one class. Text parts take color, font-size, font-weight, font-style,
+ * font-family, line-height, letter-spacing, text-transform and display: none.
+ *
+ *   .popover        the panel: width, max-height, padding, gap, background, border,
+ *                   border-radius, box-shadow, font-family (for all its text),
+ *                   transition (none | <duration>), --scale-from (where it grows from)
+ *   .arrow          the pointer to the word: width, height, display
+ *   .marker         the word, repainted: background (the marker), color (the letters),
+ *                   border-radius, padding, box-shadow, transition, --scale-from, display
+ *   .section-title  "Dictionary", "Thesaurus", "Wikipedia"
+ *   .link           "Wiktionary ↗", "Wikipedia ↗"
+ *   .headword  .pronunciation  .note  .part-of-speech
+ *   .sense          a definition (--max-count: senses per part of speech)
+ *   .sense-number   its number (color, font-weight, font-style)
+ *   .example        a usage example under it
+ *   .synonyms       the thesaurus words; .synonyms-label "noun", "opposites:"
+ *   .wiki-title  .wiki-description  .wiki-extract (-webkit-line-clamp: lines shown)
+ *   .thumbnail      the Wikipedia picture: size, border-radius, display
+ *   .rule           the line between sections: background, height, display
+ *   .status         "Looking up…", "No entries found", errors
+ *   .dictionary  .thesaurus  .wikipedia   display: none hides a whole section
+ *
+ * Also: :root { --name: value } with var(--name, fallback), and
+ * @media (prefers-color-scheme: dark | light) { … } for the system's appearance.
+ */
+
+:root {
+  --text: #1d1d1f;
+  --secondary: #6e6e73;
+  --label: #808085;
+  --link: #0a64d6;
+  --panel: #f8f8f8;
+  --line: rgba(0, 0, 0, 0.13);
+  --rule: rgba(0, 0, 0, 0.08);
+  --shadow: rgba(0, 0, 0, 0.28);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: #f2f2f5;
+    --secondary: #a0a0a6;
+    --label: #8e8e93;
+    --link: #64aaff;
+    --panel: #28282a;
+    --line: rgba(255, 255, 255, 0.13);
+    --rule: rgba(255, 255, 255, 0.09);
+    --shadow: rgba(0, 0, 0, 0.55);
+  }
+}
+
+.popover {
+  width: 400px;
+  max-height: 460px;
+  padding: 16px;
+  gap: 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 10px 36px var(--shadow);
+  transition: 320ms;
+  --scale-from: 0.9;
+}
+
+.arrow { width: 22px; height: 10px; }
+
+.marker {
+  background: #ffdb42;
+  color: #221c05;
+  border-radius: 3px;
+  padding: 1px 3px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  transition: 300ms;
+  --scale-from: 1.22;
+}
+
+.section-title { color: var(--label); font-size: 11px; font-weight: 600; }
+.link { color: var(--link); font-size: 11px; font-weight: 600; }
+
+.headword { color: var(--text); font-size: 22px; font-weight: 700; }
+.pronunciation { color: var(--secondary); font-size: 13px; }
+.note { color: var(--secondary); font-size: 12px; line-height: 16px; }
+.part-of-speech { color: var(--secondary); font-size: 13px; font-style: italic; }
+
+.sense { color: var(--text); font-size: 13px; line-height: 18px; --max-count: 6; }
+.sense-number { color: var(--text); font-weight: 700; }
+.example { color: var(--secondary); font-size: 13px; line-height: 18px; font-style: italic; }
+
+.synonyms { color: var(--text); font-size: 13px; line-height: 18px; }
+.synonyms-label { color: var(--secondary); font-style: italic; }
+
+.wiki-title { color: var(--text); font-size: 15px; font-weight: 650; }
+.wiki-description { color: var(--secondary); font-size: 12px; line-height: 16px; }
+.wiki-extract { color: var(--text); font-size: 13px; line-height: 18px; -webkit-line-clamp: 7; }
+.thumbnail { size: 72px; border-radius: 6px; }
+
+.rule { background: var(--rule); height: 1px; }
+.status { color: var(--secondary); font-size: 13px; line-height: 18px; }

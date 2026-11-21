@@ -1,0 +1,47 @@
+[package]
+name = "tlum"
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+description = "macOS-style Look Up for Linux: force-click, three-finger tap or press-and-hold a word to see its definition"
+
+[[bin]]
+name = "tlum"
+path = "src/main.rs"
+
+[dependencies]
+# Rune is pre-release: pin a dev rev and patch the crates it patches, from the same rev
+# (Rune's README, "Depending on Rune").
+rune = { git = "https://github.com/anomalyco/rune", rev = "44920b1fdfe6d1b7156d80b90f0ca0d96080d2bf", features = ["tooling"] }
+zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
+wl-clipboard-rs = "0.9"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+x11rb = "0.13"
+libloading = "0.8"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+png = "0.18"
+urlencoding = "2"
+
+[patch.crates-io]
+winit = { git = "https://github.com/anomalyco/rune", rev = "44920b1fdfe6d1b7156d80b90f0ca0d96080d2bf" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "44920b1fdfe6d1b7156d80b90f0ca0d96080d2bf" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "44920b1fdfe6d1b7156d80b90f0ca0d96080d2bf" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "44920b1fdfe6d1b7156d80b90f0ca0d96080d2bf" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "44920b1fdfe6d1b7156d80b90f0ca0d96080d2bf" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "44920b1fdfe6d1b7156d80b90f0ca0d96080d2bf" }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 2
+
+[profile.release]
+strip = true
+lto = "thin"

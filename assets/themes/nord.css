@@ -1,0 +1,20 @@
+/* Nord (nordtheme.com), whatever the system's scheme. */
+
+:root {
+  --bg: #2e3440;
+  --bg-2: #3b4252;
+  --fg: #eceff4;
+  --muted: #a3acbd;
+  --frost: #88c0d0;
+  --blue: #81a1c1;
+}
+
+.popover { background: var(--bg); border: 1px solid var(--bg-2); border-radius: 10px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45); }
+.marker { background: var(--frost); color: var(--bg); }
+
+.section-title { color: var(--blue); }
+.link { color: var(--frost); }
+.headword, .sense, .sense-number, .synonyms, .wiki-title, .wiki-extract { color: var(--fg); }
+.pronunciation, .note, .part-of-speech, .example, .synonyms-label, .wiki-description, .status { color: var(--muted); }
+.part-of-speech { color: var(--frost); }
+.rule { background: var(--bg-2); }

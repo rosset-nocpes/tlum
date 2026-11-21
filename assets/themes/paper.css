@@ -1,0 +1,38 @@
+/* Paper: the Dictionary app's printed look. Serif text on cream (night: ink-blue), a soft
+ * pencil marker, small-caps-like section titles. */
+
+:root {
+  --paper: #fbf7ee;
+  --ink: #2b2620;
+  --faded: #7a6f60;
+  --accent: #9c2f1c;
+  --serif: "Noto Serif", "C059", "Caladea", serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root { --paper: #1d2230; --ink: #e9e4d8; --faded: #a39d8f; --accent: #e0846c; }
+}
+
+.popover {
+  font-family: var(--serif);
+  background: var(--paper);
+  border: 1px solid rgba(120, 100, 70, 0.25);
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(40, 30, 10, 0.25);
+  width: 420px;
+  padding: 18px 20px;
+}
+
+.marker { background: #f6e7a6; color: #2b2620; border-radius: 2px; box-shadow: none; }
+
+.section-title { color: var(--accent); text-transform: uppercase; letter-spacing: 1.2px; font-size: 10px; font-family: sans-serif; }
+.link { color: var(--accent); font-family: sans-serif; }
+
+.headword { color: var(--ink); font-size: 26px; font-weight: 600; }
+.pronunciation { color: var(--faded); font-size: 14px; }
+.part-of-speech { color: var(--accent); }
+.sense, .synonyms, .wiki-extract { color: var(--ink); font-size: 14px; line-height: 20px; }
+.sense-number { color: var(--accent); }
+.example, .note, .wiki-description, .status, .synonyms-label { color: var(--faded); }
+.wiki-title { color: var(--ink); font-size: 17px; }
+.rule { background: rgba(120, 100, 70, 0.2); }

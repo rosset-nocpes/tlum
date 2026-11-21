@@ -1,0 +1,21 @@
+/* Minimal: a small, square, monospace card with just the definitions. No arrow, shadow,
+ * thesaurus, pictures or animation. */
+
+.popover {
+  width: 340px;
+  max-height: 320px;
+  padding: 12px;
+  gap: 10px;
+  border-radius: 0;
+  box-shadow: none;
+  font-family: "Iosevka", "Hack", monospace;
+  transition: none;
+}
+
+.arrow, .thesaurus, .thumbnail, .example, .link { display: none; }
+.marker { display: none; }
+
+.section-title { text-transform: uppercase; letter-spacing: 1px; font-size: 10px; }
+.headword { font-size: 18px; }
+.sense { --max-count: 3; }
+.wiki-extract { -webkit-line-clamp: 3; }
