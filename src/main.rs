@@ -264,7 +264,8 @@ fn on_gesture(engine: &Engine, fx: Effect, device: &str, evdev_scroll: bool) {
             let _ = device;
             engine.send(Job::Trigger(None, why));
         }
-        Effect::Dragged => engine.dragged(),
+        Effect::Released { dragged: true } => ui::released_after_drag(),
+        Effect::Released { dragged: false } => {}
         Effect::Scroll(dy) => on_popover(move |s, tx| if evdev_scroll { ui::scroll_by(s, dy, tx) } else { ui::outside(s) }),
         Effect::Press => on_popover(|s, _| ui::outside(s)),
     }

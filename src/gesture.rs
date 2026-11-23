@@ -8,8 +8,9 @@
 //! - Optionally a **mouse button** (a side button) that looks up at once.
 //!
 //! Events reach apps as usual: we only listen. A trigger fires while the button is still
-//! down, as macOS shows the popover on the deep press, and moving on with the button held
-//! (a drag that began with a pause) takes the popover back.
+//! down, as macOS shows the popover on the deep press. Moving on with the button held never
+//! closes it then: the release tells whether the press went on to drag, and only a drag that
+//! lets go off the popover (a selection or a move that began with a pause) takes it back.
 //!
 //! Button presses, two-finger scrolls and wheel turns are reported too. The popover takes the
 //! pointer only over itself, so one outside it goes to the app under it and closes the popover
@@ -50,8 +51,8 @@ pub enum Source { ThreeFingerTap, ForceClick, MouseHold, MouseButton }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Effect {
     Trigger(Source),
-    /// The button that triggered is still down and moved: the person meant to drag.
-    Dragged,
+    /// The button that triggered went up; `dragged`: it travelled on after the trigger first.
+    Released { dragged: bool },
     /// Points to scroll the popover by, positive toward later content.
     Scroll(f32),
     /// A button went down: a click, wherever the pointer is.
@@ -81,8 +82,8 @@ enum Hold {
     Idle,
     /// Down since `since` (ms), having travelled `moved` (device units for a mouse, mm for a pad).
     Pending { since: u64, moved: f64 },
-    /// Fired; still down.
-    Fired { moved: f64 },
+    /// Fired; still down. `from`: travel when it fired; `moved`: the most travelled since.
+    Fired { from: f64, moved: f64 },
     /// Cancelled or reported as a drag; waiting for the release.
     Spent,
 }
@@ -90,12 +91,20 @@ enum Hold {
 impl Hold {
     fn press(now: u64) -> Hold { Hold::Pending { since: now, moved: 0.0 } }
 
-    fn travel(&mut self, d: f64, cancel_at: f64, drag_at: f64) -> Option<Effect> {
+    /// Adds `d` of travel (a mouse's counts): too much before firing cancels it.
+    fn travel(&mut self, d: f64, cancel_at: f64) {
         match self {
-            Hold::Pending { moved, .. } => { *moved += d; if *moved > cancel_at { *self = Hold::Spent; } None }
-            Hold::Fired { moved } => { *moved += d; if *moved > drag_at { *self = Hold::Spent; Some(Effect::Dragged) } else { None } }
-            _ => None,
+            Hold::Pending { moved, .. } => { *moved += d; if *moved > cancel_at { *self = Hold::Spent; } }
+            Hold::Fired { moved, .. } => *moved += d,
+            _ => {}
         }
+    }
+
+    /// The button went up: a fired hold reports whether it travelled past `drag_at` first.
+    fn release(&mut self, drag_at: f64) -> Option<Effect> {
+        let fired = match *self { Hold::Fired { moved, .. } => Some(Effect::Released { dragged: moved > drag_at }), _ => None };
+        *self = Hold::Idle;
+        fired
     }
 
     fn deadline(&self, hold_ms: u64) -> Option<u64> {
@@ -104,7 +113,7 @@ impl Hold {
 
     fn tick(&mut self, now: u64, hold_ms: u64, source: Source) -> Option<Effect> {
         if let Hold::Pending { since, .. } = *self && now >= since + hold_ms {
-            *self = Hold::Fired { moved: 0.0 };
+            *self = Hold::Fired { from: 0.0, moved: 0.0 };
             return Some(Effect::Trigger(source));
         }
         None
@@ -122,9 +131,9 @@ impl Default for Mouse {
 }
 
 /// Counts (about 1/400 in on a typical mouse) a still press may wander, and a fired one may
-/// travel before it counts as a drag.
+/// travel before its release counts as a drag: a hand settling as the popover opens is no drag.
 const MOUSE_SLOP: f64 = 6.0;
-const MOUSE_DRAG: f64 = 14.0;
+const MOUSE_DRAG: f64 = 40.0;
 /// Points one wheel notch scrolls.
 const NOTCH: f32 = 48.0;
 
@@ -135,16 +144,16 @@ impl Mouse {
                 let down = value != 0;
                 if down { self.held += 1 } else { self.held = self.held.saturating_sub(1) }
                 if down && s.mouse_button == Some(code) { return Some(Effect::Trigger(Source::MouseButton)); }
-                match (code, down) {
-                    (BTN_LEFT, true) if self.held == 1 && s.mouse_hold => self.hold = Hold::press(now),
-                    (BTN_LEFT, false) => self.hold = Hold::Idle,
+                let released = match (code, down) {
+                    (BTN_LEFT, true) if self.held == 1 && s.mouse_hold => { self.hold = Hold::press(now); None }
+                    (BTN_LEFT, false) => self.hold.release(MOUSE_DRAG),
                     // A chord (another button with the left) isn't a force click.
-                    (_, true) if matches!(self.hold, Hold::Pending { .. }) => self.hold = Hold::Spent,
-                    _ => {}
-                }
-                down.then_some(Effect::Press)
+                    (_, true) if matches!(self.hold, Hold::Pending { .. }) => { self.hold = Hold::Spent; None }
+                    _ => None,
+                };
+                if down { Some(Effect::Press) } else { released }
             }
-            (EV_REL, REL_X | REL_Y) => self.hold.travel(value.unsigned_abs() as f64, MOUSE_SLOP, MOUSE_DRAG),
+            (EV_REL, REL_X | REL_Y) => { self.hold.travel(value.unsigned_abs() as f64, MOUSE_SLOP); None }
             (EV_REL, REL_WHEEL_HI_RES) => { self.wheel_hi_res = true; Some(Effect::Scroll(-(value as f32) / 120.0 * NOTCH)) }
             (EV_REL, REL_WHEEL) if !self.wheel_hi_res => Some(Effect::Scroll(-(value as f32) * NOTCH)),
             _ => None,
@@ -160,7 +169,7 @@ const SLOTS: usize = 10;
 const TAP_SLOP_MM: f64 = 3.0;
 const TAP_MAX_MS: u64 = 300;
 /// Millimetres a held press may wander before it isn't a force click, and travel once fired
-/// before it counts as a drag.
+/// before its release counts as a drag.
 const PRESS_SLOP_MM: f64 = 1.5;
 const PRESS_DRAG_MM: f64 = 4.0;
 /// Popover points per millimetre of two-finger travel.
@@ -223,7 +232,7 @@ impl Touchpad {
                 self.button = value != 0;
                 if let Some(session) = &mut self.session && self.button { session.clicked = true; }
                 if self.button && s.force_click && self.fingers <= 1 { self.hold = Hold::press(now); }
-                if !self.button { self.hold = Hold::Idle; }
+                if !self.button { return self.hold.release(PRESS_DRAG_MM).into_iter().collect(); }
                 // A clickpad reports every physical click, whatever the zone, as the left button.
                 if self.button { return vec![Effect::Press]; }
             }
@@ -266,7 +275,7 @@ impl Touchpad {
                 let d = self.mm((p.x, p.y), p.start);
                 match &mut self.hold {
                     Hold::Pending { moved, .. } => { *moved = d; if d > PRESS_SLOP_MM { self.hold = Hold::Spent; } }
-                    Hold::Fired { moved } => { if d - *moved > PRESS_DRAG_MM { self.hold = Hold::Spent; out.push(Effect::Dragged); } }
+                    Hold::Fired { from, moved } => *moved = moved.max(d - *from),
                     _ => {}
                 }
             }
@@ -300,7 +309,7 @@ impl Touchpad {
         if fired.is_some() {
             // Drags measure from where the force click fired.
             let at = self.slots.iter().find(|s| s.active).map_or(0.0, |p| self.mm((p.x, p.y), p.start));
-            self.hold = Hold::Fired { moved: at };
+            self.hold = Hold::Fired { from: at, moved: 0.0 };
         }
         fired
     }
@@ -363,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn a_held_still_click_is_a_force_click_and_moving_after_it_is_a_drag() {
+    fn a_held_still_click_is_a_force_click_and_its_release_tells_a_drag() {
         let mut p = Pad::new();
         p.down(0, 100, 100); p.tools(1); p.syn();
         p.ev(EV_KEY, BTN_LEFT, 1); p.syn();
@@ -373,9 +382,24 @@ mod tests {
         p.ev(EV_ABS, ABS_MT_POSITION_X, 105); p.syn(); // 0.5 mm of pressure wobble
         p.wait(400);
         assert_eq!(p.out, vec![Effect::Trigger(Source::ForceClick)]);
+        p.out.clear();
+        // Moving on while still down reports nothing: the popover stays while the finger goes.
         p.ev(EV_ABS, ABS_MT_POSITION_X, 160); p.syn();
-        assert_eq!(p.out.last(), Some(&Effect::Dragged));
+        p.ev(EV_ABS, ABS_MT_POSITION_X, 120); p.syn();
+        assert!(p.out.is_empty(), "{:?}", p.out);
         p.ev(EV_KEY, BTN_LEFT, 0); p.syn();
+        assert_eq!(p.out, vec![Effect::Released { dragged: true }], "it went 5.5 mm past where it fired");
+
+        // A force click let go where it fired (give or take a lifting finger) is no drag.
+        p.up(0); p.tools(0); p.syn();
+        p.t += 500;
+        p.out.clear();
+        p.down(0, 100, 100); p.tools(1); p.syn();
+        p.ev(EV_KEY, BTN_LEFT, 1); p.syn();
+        p.wait(700);
+        p.ev(EV_ABS, ABS_MT_POSITION_X, 140); p.syn(); // 2 mm
+        p.ev(EV_KEY, BTN_LEFT, 0); p.syn();
+        assert_eq!(p.out, vec![Effect::Press, Effect::Trigger(Source::ForceClick), Effect::Released { dragged: false }]);
     }
 
     #[test]
@@ -411,8 +435,14 @@ mod tests {
         assert_eq!(m.event(&s, EV_REL, REL_X, 2, 100), None);
         assert_eq!(m.deadline(&s), Some(s.hold_ms));
         assert_eq!(m.tick(&s, s.hold_ms), Some(Effect::Trigger(Source::MouseHold)));
-        assert_eq!(m.event(&s, EV_REL, REL_X, 20, s.hold_ms + 50), Some(Effect::Dragged));
-        m.event(&s, EV_KEY, BTN_LEFT, 0, s.hold_ms + 100);
+        // Settling after it fires is no drag; going on is, told on the release.
+        assert_eq!(m.event(&s, EV_REL, REL_X, 20, s.hold_ms + 50), None);
+        assert_eq!(m.event(&s, EV_KEY, BTN_LEFT, 0, s.hold_ms + 100), Some(Effect::Released { dragged: false }));
+        m.event(&s, EV_KEY, BTN_LEFT, 1, 1000);
+        m.tick(&s, 1000 + s.hold_ms);
+        assert_eq!(m.event(&s, EV_REL, REL_Y, 30, 1000 + s.hold_ms + 50), None);
+        assert_eq!(m.event(&s, EV_REL, REL_Y, 30, 1000 + s.hold_ms + 80), None);
+        assert_eq!(m.event(&s, EV_KEY, BTN_LEFT, 0, 1000 + s.hold_ms + 100), Some(Effect::Released { dragged: true }));
 
         // A click and a drag don't.
         m.event(&s, EV_KEY, BTN_LEFT, 1, 2000);

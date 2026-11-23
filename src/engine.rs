@@ -32,18 +32,10 @@ pub struct Screen { pub name: Option<String>, pub rect: [f64; 4], pub primary: b
 pub struct Engine {
     jobs: Sender<Job>,
     pub generation: Arc<AtomicU64>,
-    /// When the popover last opened, to tell a drag that follows its own press.
-    pub opened: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Engine {
     pub fn send(&self, job: Job) { let _ = self.jobs.send(job); }
-
-    /// The press that opened the popover kept going: it was a drag, not a lookup.
-    pub fn dragged(&self) {
-        let recent = self.opened.lock().unwrap().is_some_and(|t| t.elapsed() < Duration::from_secs(3));
-        if recent { close_all(); }
-    }
 }
 
 pub fn close_all() {
@@ -60,7 +52,7 @@ fn close_all_now() {
 
 pub fn start(config: Config, kind: desktop::Kind, screens: Vec<Screen>, pointer_replies: Receiver<String>) -> Engine {
     let (tx, rx) = mpsc::channel();
-    let engine = Engine { jobs: tx, generation: Arc::new(AtomicU64::new(0)), opened: Arc::default() };
+    let engine = Engine { jobs: tx, generation: Arc::new(AtomicU64::new(0)) };
     let e = engine.clone();
     std::thread::Builder::new().name("tlum".into()).spawn(move || worker(e, config, kind, screens, rx, pointer_replies)).unwrap();
     engine
@@ -232,7 +224,6 @@ fn show(cx: &mut Ctx, display: usize, p: &Pointer, query: String, rect: [f64; 4]
         });
     }
     *ui::VISIBLE.lock().unwrap() = Some((generation, display));
-    *cx.engine.opened.lock().unwrap() = Some(Instant::now());
 
     if let Some((_, Part::Found(w))) = &cached { fetch_thumbnail(&overlay, generation, w.thumbnail.clone()); }
     if cached.is_some() { return; }

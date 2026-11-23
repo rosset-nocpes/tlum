@@ -144,6 +144,23 @@ pub fn outside(s: &mut Popover) -> bool {
     true
 }
 
+/// How long after a release the compositor has handed the pointer to the surface under it.
+const HANDBACK: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// The press that opened the popover went on to drag before letting go. Let go on the popover,
+/// the person went to it, and it stays; elsewhere it was a drag that began with a pause (a
+/// selection, a move), not a lookup, and the popover closes. While the button was down the app
+/// under the press held the pointer; once it's up the compositor gives it to the surface under
+/// it, and `hover` says whether that's the popover.
+pub fn released_after_drag() {
+    let Some((generation, display)) = *VISIBLE.lock().unwrap() else { return };
+    let Some(o) = OVERLAYS.get().and_then(|v| v.get(display)).cloned() else { return };
+    std::thread::spawn(move || {
+        std::thread::sleep(HANDBACK);
+        o.update_if(move |s, _| s.shown.as_ref().is_some_and(|v| v.generation == generation) && outside(s));
+    });
+}
+
 /// Losing the keyboard closes the popover: a tap on another window (which evdev doesn't see as
 /// a click) or switching apps.
 pub fn on_focus(s: &mut Popover, focused: bool, _: &mut Tx) {
