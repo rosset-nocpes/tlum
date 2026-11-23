@@ -11,8 +11,10 @@
 //! down, as macOS shows the popover on the deep press, and moving on with the button held
 //! (a drag that began with a pause) takes the popover back.
 //!
-//! Two-finger scrolls and wheel turns are reported too, for scrolling the popover where it gets
-//! no wheel events of its own: as an XWayland window, on Wayland without layer-shell (GNOME).
+//! Button presses, two-finger scrolls and wheel turns are reported too. The popover takes the
+//! pointer only over itself, so one outside it goes to the app under it and closes the popover
+//! by these reports; an XWayland popover (Wayland without layer-shell: GNOME), which gets no
+//! wheel events of its own, also scrolls by them.
 
 pub const BTN_LEFT: u16 = 0x110;
 pub const BTN_MIDDLE: u16 = 0x112;
@@ -52,6 +54,8 @@ pub enum Effect {
     Dragged,
     /// Points to scroll the popover by, positive toward later content.
     Scroll(f32),
+    /// A button went down: a click, wherever the pointer is.
+    Press,
 }
 
 #[derive(Clone, Debug)]
@@ -138,7 +142,7 @@ impl Mouse {
                     (_, true) if matches!(self.hold, Hold::Pending { .. }) => self.hold = Hold::Spent,
                     _ => {}
                 }
-                None
+                down.then_some(Effect::Press)
             }
             (EV_REL, REL_X | REL_Y) => self.hold.travel(value.unsigned_abs() as f64, MOUSE_SLOP, MOUSE_DRAG),
             (EV_REL, REL_WHEEL_HI_RES) => { self.wheel_hi_res = true; Some(Effect::Scroll(-(value as f32) / 120.0 * NOTCH)) }
@@ -220,6 +224,8 @@ impl Touchpad {
                 if let Some(session) = &mut self.session && self.button { session.clicked = true; }
                 if self.button && s.force_click && self.fingers <= 1 { self.hold = Hold::press(now); }
                 if !self.button { self.hold = Hold::Idle; }
+                // A clickpad reports every physical click, whatever the zone, as the left button.
+                if self.button { return vec![Effect::Press]; }
             }
             (EV_KEY, c) if Self::tool_count(c).is_some() => {
                 let n = Self::tool_count(c).unwrap();
@@ -362,7 +368,8 @@ mod tests {
         p.down(0, 100, 100); p.tools(1); p.syn();
         p.ev(EV_KEY, BTN_LEFT, 1); p.syn();
         p.wait(300);
-        assert!(p.out.is_empty());
+        assert_eq!(p.out, vec![Effect::Press]);
+        p.out.clear();
         p.ev(EV_ABS, ABS_MT_POSITION_X, 105); p.syn(); // 0.5 mm of pressure wobble
         p.wait(400);
         assert_eq!(p.out, vec![Effect::Trigger(Source::ForceClick)]);
@@ -379,7 +386,7 @@ mod tests {
         p.t += 100;
         p.ev(EV_ABS, ABS_MT_POSITION_Y, 140); p.syn();
         p.wait(1000);
-        assert!(p.out.is_empty(), "{:?}", p.out);
+        assert_eq!(p.out, vec![Effect::Press], "a click, no force click");
     }
 
     #[test]
@@ -400,7 +407,7 @@ mod tests {
     fn a_held_still_mouse_button_looks_up_and_jitter_is_forgiven() {
         let s = Settings::default();
         let mut m = Mouse::default();
-        assert_eq!(m.event(&s, EV_KEY, BTN_LEFT, 1, 0), None);
+        assert_eq!(m.event(&s, EV_KEY, BTN_LEFT, 1, 0), Some(Effect::Press));
         assert_eq!(m.event(&s, EV_REL, REL_X, 2, 100), None);
         assert_eq!(m.deadline(&s), Some(s.hold_ms));
         assert_eq!(m.tick(&s, s.hold_ms), Some(Effect::Trigger(Source::MouseHold)));
@@ -424,5 +431,7 @@ mod tests {
         assert_eq!(m.event(&s, EV_REL, REL_WHEEL, -1, 0), Some(Effect::Scroll(NOTCH)));
         assert_eq!(m.event(&s, EV_REL, REL_WHEEL_HI_RES, -60, 0), Some(Effect::Scroll(NOTCH / 2.0)));
         assert_eq!(m.event(&s, EV_REL, REL_WHEEL, -1, 0), None, "hi-res wheels report twice");
+        assert_eq!(m.event(&s, EV_KEY, 0x111, 1, 0), Some(Effect::Press));
+        assert_eq!(m.event(&s, EV_KEY, 0x111, 0, 0), None);
     }
 }

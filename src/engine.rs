@@ -192,7 +192,8 @@ fn show(cx: &mut Ctx, display: usize, p: &Pointer, query: String, rect: [f64; 4]
     let screen = p.screen.unwrap_or([0.0, 0.0, 1920.0, 1080.0]);
     let pointer = [(p.x - screen[0]) as f32, (p.y - screen[1]) as f32];
     // No compositor: the overlay can't be see-through, so it shows the screen as it is now.
-    if cx.desktop.as_mut().is_ok_and(|d| d.opaque_overlays()) {
+    let opaque = cx.desktop.as_mut().is_ok_and(|d| d.opaque_overlays());
+    if opaque {
         let whole = desktop(cx).and_then(|d| d.capture([screen[0] as i32, screen[1] as i32, screen[2] as i32, screen[3] as i32], p));
         if let Ok(w) = whole {
             let px = rune::Pixels::new();
@@ -219,7 +220,8 @@ fn show(cx: &mut Ctx, display: usize, p: &Pointer, query: String, rect: [f64; 4]
         offset: None, area: p.area.map(local), pointer, shown_at: Instant::now(), definition, wiki, thumbnail: None,
     };
     overlay.update(move |s: &mut Popover, _| { s.hover = false; s.shown = Some(shown); });
-    overlay.set_input(rune::OverlayInput::All);
+    // Only the popover takes the pointer, unless the overlay hides a live screen behind a picture.
+    overlay.set_input(if opaque { rune::OverlayInput::All } else { rune::OverlayInput::Regions });
     overlay.show();
     overlay.request_keys();
     if std::env::var_os("TLUM_DEBUG").is_some() {

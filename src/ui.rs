@@ -135,9 +135,26 @@ pub fn dismiss_now(s: &mut Popover, tx: &mut Tx) {
     hide(s.display);
 }
 
-/// Scrolls the popover by `dy` points while the pointer is over it.
+/// A click or scroll somewhere on screen, read from evdev. Over the popover it's the popover's
+/// own; elsewhere it goes to the app under the pointer, and the popover closes, as on macOS.
+/// True when it closed.
+pub fn outside(s: &mut Popover) -> bool {
+    if s.shown.is_none() || s.hover { return false; }
+    dismiss(s);
+    true
+}
+
+/// Losing the keyboard closes the popover: a tap on another window (which evdev doesn't see as
+/// a click) or switching apps.
+pub fn on_focus(s: &mut Popover, focused: bool, _: &mut Tx) {
+    if !focused && s.shown.is_some() { dismiss(s); }
+}
+
+/// Scrolls the popover by `dy` points while the pointer is over it; elsewhere a scroll closes
+/// it (`outside`). True when the view must run again.
 pub fn scroll_by(s: &mut Popover, dy: f32, tx: &mut Tx) -> bool {
-    if s.shown.is_none() || !s.hover { return false; }
+    if outside(s) { return true; }
+    if s.shown.is_none() { return false; }
     let Some(pos) = *s.scroll.lock().unwrap() else { return false };
     let y = (pos.offset[1] + dy).clamp(0.0, pos.max[1].max(0.0));
     tx.scroll_to_instant("lu-body", 0.0, y);
@@ -334,11 +351,16 @@ fn presence(animate: bool, from: f32, duration: f32, bounce: f32) -> Transition 
 }
 
 pub fn view(s: &Popover, cx: &mut Cx<Popover>) -> El {
-    let root = el().key("lu-root").w_full().h_full().hit().on_press(dismiss)
+    // The overlay takes the pointer only over the popover (`OverlayInput::Regions`): elsewhere
+    // the desktop under it hovers and clicks as usual, and a click or scroll there closes the
+    // popover through evdev (`outside`). Over a backdrop (no compositor: the screen as it was)
+    // nothing under it is live, so the background takes every click and wheel and closes it.
+    let root = el().key("lu-root").w_full().h_full().on_press(dismiss)
+        .on_wheel(|s: &mut Popover, _, _| { if s.shown.is_some() { dismiss(s); } true })
         .on_layout(|s: &mut Popover, r| if s.size != Some([r[2], r[3]]) { s.size = Some([r[2], r[3]]) })
         .on_pointer_move_local(|s: &mut Popover, p, tx| calibrate(s, [p.window_x, p.window_y], tx));
     let root = match &s.backdrop {
-        Some(b) => root.child(el().key("lu-backdrop").w_full().h_full().pixels(b).pin(Some(0.0), Some(0.0), None, None)),
+        Some(b) => root.hit().child(el().key("lu-backdrop").w_full().h_full().pixels(b).pin(Some(0.0), Some(0.0), None, None)),
         None => root,
     };
     let Some(v) = &s.shown else { return root };
@@ -363,13 +385,16 @@ pub fn view(s: &Popover, cx: &mut Cx<Popover>) -> El {
         .child(content(&t, v));
     let mut panel = col().key("lu-panel").w(w).radius(t.popover.radius).fill(t.popover.background.color()).clip_rounded(t.popover.radius)
         .on_press(|_: &mut Popover| {})
-        .on_hover_change(|s: &mut Popover, on, _| s.hover = on)
         .child(body);
     if t.popover.border_width > 0.0 { panel = panel.border(t.popover.border_width, t.popover.border.color()); }
     if let Some(sh) = t.popover.shadow { panel = panel.box_shadow(sh.rune()); }
     // Grows from the arrow's tip; closing shrinks back a little as it fades.
     let origin_x = (arrow_x + t.arrow.width / 2.0) / w;
+    // The popover, arrow included, is the overlay's one hit region, and where `hover` holds:
+    // a click or wheel on it is its own and doesn't close it.
     let mut pop_el = col().key(format!("lu-pop-{}", v.generation)).w(w).origin(origin_x, if below { 0.0 } else { 1.0 })
+        .hit().on_hover_change(|s: &mut Popover, on, _| s.hover = on)
+        .on_wheel(|_: &mut Popover, _, _| true)
         .transition(presence(t.popover.animate, t.popover.scale_from, t.popover.duration, 0.18));
     pop_el = if below { pop_el.pt(arrow_h) } else { pop_el.pb(arrow_h) };
     pop_el = pop_el.child(panel);
@@ -404,22 +429,38 @@ mod tests {
     fn offset(rt: &Runtime<Popover>) -> f32 { rt.state.scroll.lock().unwrap().map_or(-1.0, |p| p.offset[1]) }
 
     #[test]
-    fn wheel_and_two_finger_scrolls_move_the_popover_only_under_the_pointer() {
+    fn evdev_scrolls_move_the_popover_under_the_pointer_and_close_it_elsewhere() {
         let mut rt = Runtime::new(crate::preview::init(), view, (1000.0, 680.0), Env { system_dark: true, scale: 2.0 });
         rt.frame(0.0);
         settle(&mut rt);
         let max = rt.state.scroll.lock().unwrap().expect("the body reports its scroll").max[1];
         assert!(max > 20.0, "the sample entry overflows the popover ({max})");
         let step = max / 2.0;
-        rt.update(move |s, tx| { scroll_by(s, step, tx); });
-        settle(&mut rt);
-        assert_eq!(offset(&rt), 0.0, "not hovered: the page under the pointer keeps the wheel");
         rt.update(move |s, tx| { s.hover = true; scroll_by(s, step, tx); });
         settle(&mut rt);
         assert!((offset(&rt) - step).abs() < 0.5, "scrolled to {} of {max}", offset(&rt));
         rt.update(|s, tx| { scroll_by(s, 10_000.0, tx); });
         settle(&mut rt);
         assert!((offset(&rt) - max).abs() < 0.5, "clamped at the end");
+        rt.update(move |s, tx| { s.hover = false; scroll_by(s, step, tx); });
+        settle(&mut rt);
+        assert!(rt.state.shown.is_none(), "a scroll outside the popover closes it");
+    }
+
+    #[test]
+    fn a_wheel_scrolls_the_popover_over_it_and_closes_it_elsewhere() {
+        let mut rt = Runtime::new(crate::preview::init(), view, (1000.0, 680.0), Env { system_dark: true, scale: 2.0 });
+        rt.frame(0.0);
+        settle(&mut rt);
+        let (x, y) = rt.find("lu-body").unwrap();
+        rt.wheel_event(rune::WheelEvent::new(0.0, -120.0).at(x, y).precise(false));
+        settle(&mut rt);
+        assert!(rt.state.shown.is_some() && offset(&rt) > 0.0, "the body scrolled ({})", offset(&rt));
+        // A new gesture, after the last one has gone idle.
+        for _ in 0..30 { rt.frame(1.0 / 60.0); }
+        rt.wheel_event(rune::WheelEvent::new(0.0, -120.0).at(950.0, 600.0).precise(false));
+        settle(&mut rt);
+        assert!(rt.state.shown.is_none(), "a wheel outside the popover closes it");
     }
 
     /// Where the marker and popover draw over the first frames of a show, as the surface
@@ -476,6 +517,25 @@ mod tests {
         assert!((m[0] - at[0]).abs() < 0.5 && (m[1] - at[1]).abs() < 0.5, "marker at {m:?}, word at {at:?}");
         let p = rt.presented("lu-pop-1").expect("popover").0;
         assert!(p[1] >= at[1] + at[3], "popover hangs below the word, clear of the panel: {p:?}");
+    }
+
+    /// The overlay takes the pointer only over the popover, so the desktop around it still
+    /// hovers and clicks; over a backdrop (no compositor) it takes the whole screen.
+    #[test]
+    fn only_the_popover_takes_the_pointer_unless_over_a_backdrop() {
+        let mut rt = Runtime::new(crate::preview::init(), view, (1000.0, 680.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        settle(&mut rt);
+        let p = rt.presented("lu-pop-1").expect("popover").0;
+        let regions = rt.hit_regions().to_vec();
+        assert!(!regions.is_empty(), "the popover takes the pointer");
+        for r in &regions {
+            assert!(r[0] >= p[0] - 1.0 && r[1] >= p[1] - 1.0 && r[2] <= p[0] + p[2] + 1.0 && r[3] <= p[1] + p[3] + 1.0,
+                "region {r:?} reaches past the popover {p:?}");
+        }
+        rt.update(|s, _| { let px = Pixels::new(); px.set(1, 1, vec![0; 4]); s.backdrop = Some(px); });
+        settle(&mut rt);
+        assert!(rt.hit_regions().iter().any(|r| r[2] - r[0] >= 999.0 && r[3] - r[1] >= 679.0), "{:?}", rt.hit_regions());
     }
 
     #[test]

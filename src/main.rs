@@ -206,7 +206,7 @@ fn daemon() {
                 // GNOME has no layer-shell: the overlay is an XWayland window, which may take
                 // clicks only when asked.
                 xwayland_input: true, ..Default::default()
-            }).on_key(ui::on_key).setup(setup_images).animate_reveal(), state);
+            }).on_key(ui::on_key).on_focus(ui::on_focus).setup(setup_images).animate_reveal(), state);
             handles.push(overlay);
             screens.push(Screen { name: d.name.clone(), rect, primary: d.primary, scale: d.scale });
         }
@@ -251,7 +251,7 @@ fn register_shortcut(kind: desktop::Kind, conn: &zbus::blocking::Connection, key
 }
 
 /// `evdev_scroll`: whether wheel and two-finger scrolls read from evdev scroll the popover, which
-/// only an XWayland overlay needs.
+/// only an XWayland overlay needs. Elsewhere they, and clicks, only close it when outside it.
 fn on_gesture(engine: &Engine, fx: Effect, device: &str, evdev_scroll: bool) {
     match fx {
         Effect::Trigger(source) => {
@@ -265,12 +265,13 @@ fn on_gesture(engine: &Engine, fx: Effect, device: &str, evdev_scroll: bool) {
             engine.send(Job::Trigger(None, why));
         }
         Effect::Dragged => engine.dragged(),
-        Effect::Scroll(_) if !evdev_scroll => {}
-        Effect::Scroll(dy) => {
-            let Some((_, display)) = *ui::VISIBLE.lock().unwrap() else { return };
-            if let Some(o) = ui::OVERLAYS.get().and_then(|v| v.get(display)) {
-                o.update_if(move |s, tx| ui::scroll_by(s, dy, tx));
-            }
-        }
+        Effect::Scroll(dy) => on_popover(move |s, tx| if evdev_scroll { ui::scroll_by(s, dy, tx) } else { ui::outside(s) }),
+        Effect::Press => on_popover(|s, _| ui::outside(s)),
     }
+}
+
+/// Runs `f` on the overlay showing the popover, if one is; the view runs again when it says.
+fn on_popover(f: impl FnOnce(&mut Popover, &mut rune::Tx) -> bool + Send + 'static) {
+    let Some((_, display)) = *ui::VISIBLE.lock().unwrap() else { return };
+    if let Some(o) = ui::OVERLAYS.get().and_then(|v| v.get(display)) { o.update_if(f); }
 }
