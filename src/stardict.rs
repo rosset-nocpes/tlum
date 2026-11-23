@@ -2,9 +2,9 @@
 //! free Linux dictionaries ship in. Each is a folder under the dictionaries directory, with its
 //! index and data stored uncompressed (`library::normalize` unpacks `.idx.gz` and `.dict.dz`).
 //!
-//! The index stays in memory as raw bytes plus entry starts, sorted as StarDict sorts it (ASCII
-//! case-insensitively, then bytewise), so a lookup is a binary search; the data is read from
-//! disk at the entry's offset.
+//! The index is mapped (`Mapped`), with its entries' starts in memory, sorted as StarDict sorts
+//! it (ASCII case-insensitively, then bytewise), so a lookup is a binary search touching a few
+//! of its pages; the data is read from disk at the entry's offset.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use crate::dict::{Definition, Meaning, Sense, strip_html};
 
 pub struct StarDict {
-    idx: Vec<u8>,
+    idx: crate::mapped::Mapped,
     /// Where each entry starts in `idx`.
     starts: Vec<u32>,
     offset64: bool,
@@ -43,7 +43,7 @@ impl StarDict {
         let get = |k: &str| info.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
         let stem = ifo.with_extension("");
         let idx_path = stem.with_extension("idx");
-        let idx = std::fs::read(&idx_path).map_err(|e| format!("{}: {e}", idx_path.display()))?;
+        let idx = crate::mapped::Mapped::open(&idx_path)?;
         let offset64 = get("idxoffsetbits") == Some("64");
         let tail = if offset64 { 12 } else { 8 };
         let mut starts = Vec::with_capacity(get("wordcount").and_then(|n| n.parse().ok()).unwrap_or(0));
@@ -54,6 +54,8 @@ impl StarDict {
             starts.push(i as u32);
             i += nul + 1 + tail;
         }
+        // Finding the starts read every page: let them go until a lookup wants some.
+        idx.release();
         let dict = stem.with_extension("dict");
         if !dict.exists() { return Err(format!("{} is missing", dict.display())); }
         Ok(StarDict {

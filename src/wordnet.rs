@@ -1,11 +1,10 @@
 //! Princeton WordNet, read straight from its database files (`index.noun`, `data.noun`, … and
 //! the `*.exc` exception lists): an offline English dictionary and thesaurus.
 //!
-//! The index files stay in memory and are binary-searched; a synset is read from its data file
-//! at the offset the index gives. Inflected forms find their lemma as WordNet's own `morphy`
+//! The index files and exception lists are mapped and binary-searched (`Lines`); a synset is
+//! read from its data file at the offset the index gives. Inflected forms find their lemma as WordNet's own `morphy`
 //! does: the exception lists, then each part of speech's suffix rules.
 
-use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -20,12 +19,62 @@ pub const FILES: [&str; 12] = [
     "noun.exc", "verb.exc", "adj.exc", "adv.exc",
 ];
 
+/// A file of lines sorted by their first word (an index, an exception list), mapped, with where
+/// each line starts: a lookup is a binary search over a few of its pages.
+struct Lines {
+    text: crate::mapped::Mapped,
+    starts: Vec<u32>,
+}
+
+impl Lines {
+    /// A missing file is an empty list (`required` says it may not be).
+    fn open(path: &Path, required: bool) -> Result<Lines, String> {
+        let text = match crate::mapped::Mapped::open(path) {
+            Ok(t) => t,
+            Err(_) if !required && !path.exists() => return Ok(Lines { text: crate::mapped::Mapped::empty(), starts: Vec::new() }),
+            Err(e) => return Err(e),
+        };
+        if text.len() > u32::MAX as usize { return Err(format!("{} is too large", path.display())); }
+        let mut lines = Lines { text, starts: Vec::new() };
+        let mut starts = Vec::new();
+        let mut at = 0;
+        for line in lines.text.split_inclusive(|b| *b == b'\n') {
+            // The licence header's lines start with spaces.
+            if !line.starts_with(b" ") && !line.trim_ascii().is_empty() { starts.push(at as u32); }
+            at += line.len();
+        }
+        // WordNet keeps them sorted, as its own binary search needs; make sure of it.
+        if !starts.is_sorted_by(|a, b| lines.key(*a) <= lines.key(*b)) { starts.sort_by(|a, b| lines.key(*a).cmp(lines.key(*b))); }
+        lines.starts = starts;
+        // Finding the lines read every page: let them go until a lookup wants some.
+        lines.text.release();
+        Ok(lines)
+    }
+
+    fn line(&self, start: u32) -> &[u8] {
+        let s = &self.text[start as usize..];
+        &s[..s.iter().position(|b| *b == b'\n').unwrap_or(s.len())]
+    }
+
+    fn key(&self, start: u32) -> &[u8] {
+        let l = self.line(start);
+        &l[..l.iter().position(|b| *b == b' ').unwrap_or(l.len())]
+    }
+
+    /// The lines whose first word is `key`.
+    fn find(&self, key: &str) -> impl Iterator<Item = &str> + use<'_> {
+        let lo = self.starts.partition_point(|s| self.key(*s) < key.as_bytes());
+        let n = self.starts[lo..].iter().take_while(|s| self.key(**s) == key.as_bytes()).count();
+        self.starts[lo..lo + n].iter().filter_map(|s| std::str::from_utf8(self.line(*s)).ok())
+    }
+}
+
 pub struct WordNet {
     dir: PathBuf,
-    /// Each part of speech's index, and where its entry lines start.
-    index: Vec<(String, Vec<usize>)>,
-    /// Inflected form → lemmas, per part of speech.
-    exceptions: Vec<HashMap<String, Vec<String>>>,
+    /// Each part of speech's index.
+    index: Vec<Lines>,
+    /// Each part of speech's inflected forms and their lemmas (`axes ax axis`).
+    exceptions: Vec<Lines>,
 }
 
 impl WordNet {
@@ -33,41 +82,21 @@ impl WordNet {
         let mut index = Vec::new();
         let mut exceptions = Vec::new();
         for (file, _) in POS {
-            let path = dir.join(format!("index.{file}"));
-            let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            // The licence header's lines start with spaces.
-            let mut starts = Vec::new();
-            let mut at = 0;
-            for line in text.split_inclusive('\n') {
-                if !line.starts_with(' ') && !line.trim().is_empty() { starts.push(at); }
-                at += line.len();
-            }
-            index.push((text, starts));
-            let exc = std::fs::read_to_string(dir.join(format!("{file}.exc"))).unwrap_or_default();
-            let mut map: HashMap<String, Vec<String>> = HashMap::new();
-            for l in exc.lines() {
-                let mut w = l.split_whitespace();
-                if let Some(form) = w.next() { map.entry(form.to_string()).or_default().extend(w.map(str::to_string)); }
-            }
-            exceptions.push(map);
+            index.push(Lines::open(&dir.join(format!("index.{file}")), true)?);
+            exceptions.push(Lines::open(&dir.join(format!("{file}.exc")), false)?);
         }
         Ok(WordNet { dir: dir.to_path_buf(), index, exceptions })
     }
 
     /// The index line for `lemma` under part of speech `p`.
     fn entry(&self, p: usize, lemma: &str) -> Option<&str> {
-        let (text, starts) = &self.index[p];
-        let line = |i: usize| { let s = &text[starts[i]..]; &s[..s.find('\n').unwrap_or(s.len())] };
-        let key = |i: usize| line(i).split(' ').next().unwrap_or("");
-        let (mut lo, mut hi) = (0, starts.len());
-        while lo < hi { let mid = (lo + hi) / 2; if key(mid) < lemma { lo = mid + 1 } else { hi = mid } }
-        (lo < starts.len() && key(lo) == lemma).then(|| line(lo))
+        self.index[p].find(lemma).next()
     }
 
     /// Lemmas `word` may be a form of under part of speech `p`, as `morphy` finds them.
     fn lemmas(&self, p: usize, word: &str) -> Vec<String> {
         let mut out = vec![word.to_string()];
-        if let Some(l) = self.exceptions[p].get(word) { out.extend(l.iter().cloned()); }
+        for line in self.exceptions[p].find(word) { out.extend(line.split_whitespace().skip(1).map(str::to_string)); }
         let rules: &[(&str, &str)] = match p {
             0 => &[("s", ""), ("ses", "s"), ("xes", "x"), ("zes", "z"), ("ches", "ch"), ("shes", "sh"), ("men", "man"), ("ies", "y")],
             1 => &[("s", ""), ("ies", "y"), ("es", "e"), ("es", ""), ("ed", "e"), ("ed", ""), ("ing", "e"), ("ing", "")],

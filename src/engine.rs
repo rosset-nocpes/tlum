@@ -64,8 +64,70 @@ struct Ctx {
     config: Arc<Config>,
     screens: Vec<Screen>,
     desktop: Result<Box<dyn Desktop>, String>,
-    ocr: Option<Result<Ocr, String>>,
+    ocr: Reader,
     cache: Cache,
+}
+
+/// Tesseract holds 20 to 35 MB (more with more languages), so it's loaded for lookups and let
+/// go after a while without one. Loading takes under 100 ms, on its own thread from the start of
+/// a lookup, while the screen is cleared, the pointer found and the screen captured.
+enum Reader {
+    None,
+    Loading(String, std::thread::JoinHandle<Result<Ocr, String>>, Instant),
+    Loaded(String, Result<Ocr, String>, Instant),
+}
+
+/// How long Tesseract stays loaded after a lookup.
+const OCR_IDLE: Duration = Duration::from_secs(5 * 60);
+
+/// How long after the popover was last seen everything it held is gone: Rune lets the overlay's
+/// surface go a minute after it hides and the GPU device five minutes after that (`main`).
+const SETTLE: Duration = Duration::from_secs(7 * 60);
+
+impl Reader {
+    /// Starts loading `lang` unless it's loaded or on its way.
+    fn prepare(&mut self, lang: &str) {
+        let current = match self { Reader::Loading(l, _, _) | Reader::Loaded(l, _, _) => Some(l.as_str()), Reader::None => None };
+        if current == Some(lang) { return; }
+        let l = lang.to_string();
+        *self = Reader::Loading(lang.to_string(), std::thread::spawn(move || Ocr::new(&l)), Instant::now());
+    }
+
+    /// Tesseract for `lang`, once it has loaded.
+    fn get(&mut self, lang: &str) -> Result<&mut Ocr, String> {
+        self.prepare(lang);
+        if let Reader::Loading(..) = self {
+            let Reader::Loading(l, handle, _) = std::mem::replace(self, Reader::None) else { unreachable!() };
+            let ocr = handle.join().unwrap_or_else(|_| Err("Tesseract crashed while loading".into()));
+            if let Err(e) = &ocr { eprintln!("tlum: OCR unavailable: {e}"); }
+            *self = Reader::Loaded(l, ocr, Instant::now());
+        }
+        let Reader::Loaded(_, ocr, used) = self else { unreachable!() };
+        *used = Instant::now();
+        ocr.as_mut().map_err(|e| e.clone())
+    }
+
+    /// Lets Tesseract go when no lookup has wanted it for `OCR_IDLE`, including one loaded for
+    /// a lookup that failed before reading (no pointer, no capture).
+    fn idle(&mut self) {
+        let unused = match self {
+            Reader::Loaded(_, _, used) => used.elapsed() >= OCR_IDLE,
+            Reader::Loading(_, handle, asked) => handle.is_finished() && asked.elapsed() >= OCR_IDLE,
+            Reader::None => false,
+        };
+        if unused {
+            *self = Reader::None;
+            give_back_memory();
+        }
+    }
+}
+
+/// Returns the heap's free pages to the system: glibc keeps what was freed (Tesseract's model,
+/// each lookup thread's arena) for reuse otherwise.
+fn give_back_memory() {
+    #[cfg(target_env = "gnu")]
+    // SAFETY: malloc_trim only releases free memory.
+    unsafe { libc::malloc_trim(0); }
 }
 
 fn worker(engine: Engine, config: Config, kind: desktop::Kind, screens: Vec<Screen>, jobs: Receiver<Job>, replies: Receiver<String>) {
@@ -75,24 +137,36 @@ fn worker(engine: Engine, config: Config, kind: desktop::Kind, screens: Vec<Scre
         Ok(d) => eprintln!("tlum: desktop backend: {}", d.name()),
         Err(e) => eprintln!("tlum: no desktop backend: {e}"),
     }
-    let mut cx = Ctx { engine, config: Arc::new(config), screens, desktop, ocr: None, cache: Cache::default() };
-    // Load Tesseract now, not on the first lookup, and open the installed dictionaries.
-    let mut ocr_language = cx.config.ocr_language.clone();
-    cx.ocr = Some(Ocr::new(&ocr_language));
-    if let Some(Err(e)) = &cx.ocr { eprintln!("tlum: OCR unavailable: {e}"); }
+    let mut cx = Ctx { engine, config: Arc::new(config), screens, desktop, ocr: Reader::None, cache: Cache::default() };
+    // Tesseract loads for each burst of lookups; say now if it can't.
+    if crate::ocr::tessdata_dir(&cx.config.ocr_language).is_none() {
+        eprintln!("tlum: OCR unavailable: no Tesseract data for '{}' (install your distro's Tesseract language pack)", cx.config.ocr_language);
+    }
+    // Open the installed dictionaries ahead of the first lookup.
     let local: Vec<String> = cx.config.active_sources().into_iter().filter(|id| !matches!(id.as_str(), "dictionary" | "thesaurus" | "wikipedia")).collect();
     std::thread::spawn(move || crate::library::warm(&local));
-    while let Ok(job) = jobs.recv() {
+    // While something may still be let go (Tesseract, Rune's GPU device), the worker looks
+    // each minute; once all of it has, and the heap is trimmed, it sleeps until a lookup.
+    let mut seen = Instant::now();
+    let mut settled = true;
+    loop {
+        let next = if settled { jobs.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected) } else { jobs.recv_timeout(Duration::from_secs(60)) };
+        let job = match next {
+            Ok(job) => job,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if ui::VISIBLE.lock().unwrap().is_some() { seen = Instant::now(); }
+                cx.ocr.idle();
+                if seen.elapsed() >= SETTLE && matches!(cx.ocr, Reader::None) { give_back_memory(); settled = true; }
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        (seen, settled) = (Instant::now(), false);
         // Only the newest trigger matters.
         let mut job = job;
         while let Ok(next) = jobs.try_recv() { job = next; }
         let started = Instant::now();
         cx.config = crate::config::current();
-        if cx.config.ocr_language != ocr_language {
-            ocr_language = cx.config.ocr_language.clone();
-            cx.ocr = Some(Ocr::new(&ocr_language));
-            if let Some(Err(e)) = &cx.ocr { eprintln!("tlum: OCR unavailable: {e}"); }
-        }
         let result = match job {
             Job::Trigger(at, why) => trigger(&mut cx, at).map(|q| format!("{why}: {q}")),
             Job::Text(t) => text(&mut cx, t.clone()).map(|_| format!("text: {t}")),
@@ -141,11 +215,7 @@ fn capture(cx: &mut Ctx, p: &Pointer, screen: [f64; 4]) -> Result<scan::Shot, St
 }
 
 fn find(cx: &mut Ctx, p: &Pointer, shot: &scan::Shot) -> Result<Option<Hit>, String> {
-    let ocr = match cx.ocr.as_mut() {
-        Some(Ok(o)) => o,
-        Some(Err(e)) => return Err(format!("can't read the screen: {e}")),
-        None => unreachable!(),
-    };
+    let ocr = cx.ocr.get(&cx.config.ocr_language).map_err(|e| format!("can't read the screen: {e}"))?;
     let prepared = scan::prepare(shot, [p.x, p.y]);
     let words = ocr.words(&prepared.gray, prepared.width, prepared.height);
     if std::env::var_os("TLUM_DEBUG").is_some() {
@@ -156,6 +226,7 @@ fn find(cx: &mut Ctx, p: &Pointer, shot: &scan::Shot) -> Result<Option<Hit>, Str
 }
 
 fn trigger(cx: &mut Ctx, at: Option<Pointer>) -> Result<String, String> {
+    cx.ocr.prepare(&cx.config.ocr_language);
     clear_screen();
     let mut p = match at { Some(p) => p, None => pointer(cx)? };
     let (display, screen) = screen_for(cx, &p);

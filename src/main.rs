@@ -11,6 +11,7 @@ mod desktop;
 mod dict;
 mod engine;
 mod gesture;
+mod gpu;
 mod hypr;
 mod icons;
 mod image;
@@ -18,6 +19,7 @@ mod input;
 mod install;
 mod kwin;
 mod library;
+mod mapped;
 mod ocr;
 mod portal;
 mod preview;
@@ -81,6 +83,10 @@ fn call(method: &str, body: Option<String>) -> Result<(), String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // The commands that draw: load only the GPU driver they draw with.
+    if args.first().is_none_or(|a| matches!(a.as_str(), "run" | "settings") || (a.starts_with("--") && a != "--help")) {
+        gpu::load_only_the_drawing_driver();
+    }
     if args.first().is_some_and(|a| a.starts_with("--") && a != "--help") {
         return preview::run();
     }
@@ -271,7 +277,10 @@ fn daemon() {
                 // GNOME has no layer-shell: the overlay is an XWayland window, which may take
                 // clicks only when asked.
                 xwayland_input: true, ..Default::default()
-            }).on_key(ui::on_key).on_focus(ui::on_focus).setup(setup_images).animate_reveal(), state);
+            }).on_key(ui::on_key).on_focus(ui::on_focus).setup(setup_images).animate_reveal()
+                // Hidden a minute, the overlay gives its surface back, and five minutes on Rune
+                // gives the GPU device back too (some 30 MB): the next show then takes ~75 ms more.
+                .release_gpu_after(std::time::Duration::from_secs(60)), state);
             handles.push(overlay);
             screens.push(Screen { name: d.name.clone(), rect, primary: d.primary, scale: d.scale });
         }
