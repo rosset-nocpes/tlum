@@ -202,7 +202,7 @@ pub fn capture_area(conn: &Connection, rect: [i32; 4]) -> Result<Shot, String> {
 pub fn capture_with_spectacle(rect: [i32; 4], screen: [f64; 4], scale: f64) -> Result<Shot, String> {
     let file = script_dir().join("spectacle.png");
     let _ = std::fs::remove_file(&file);
-    let status = std::process::Command::new("spectacle").args(["-b", "-n", "-m", "-o"]).arg(&file)
+    let status = crate::gpu::scrub(std::process::Command::new("spectacle").args(["-b", "-n", "-m", "-o"]).arg(&file))
         .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status()
         .map_err(|e| format!("spectacle isn't available: {e}"))?;
     if !status.success() { return Err("spectacle failed".into()); }

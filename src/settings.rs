@@ -527,7 +527,7 @@ fn restart(s: &mut Settings, start: bool) {
         }
         if start {
             let null = std::process::Stdio::null;
-            if let Ok(mut child) = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).stdin(null()).stdout(null()).stderr(null()).spawn()) {
+            if let Ok(mut child) = std::env::current_exe().and_then(|exe| crate::gpu::scrub(std::process::Command::new(exe).stdin(null()).stdout(null()).stderr(null())).spawn()) {
                 std::thread::spawn(move || child.wait());
             }
             for _ in 0..60 { if daemon_running() { break; } std::thread::sleep(Duration::from_millis(50)); }
@@ -914,7 +914,7 @@ fn appearance(s: &Settings, k: &Kit, layer: &mut Vec<El>, system_dark: bool) -> 
         (Some(_), n) => format!("{} is in use, with {n} problem{}:", path.display(), if n == 1 { "" } else { "s" }),
     };
     let mut css_rows = vec![setting(k, "css", "Custom CSS", Some(&css_state), row().gap(8.0)
-        .child(button(k, if s.user_css.is_some() { "Edit" } else { "Create" }, ButtonVariant::Neutral, |s, tx| {
+        .child(button(k, if s.user_css.is_some() { "Edit" } else { "Create" }, ButtonVariant::Neutral, |s, _| {
             let path = style::user_path();
             if !path.exists() {
                 let made = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&path, style::DEFAULT_CSS));
@@ -922,7 +922,7 @@ fn appearance(s: &Settings, k: &Kit, layer: &mut Vec<El>, system_dark: bool) -> 
                 s.user_css = Some(style::DEFAULT_CSS.to_string());
                 s.restyle();
             }
-            if tx.open_url(&format!("file://{}", path.display())).is_err() { s.error = Some(format!("Couldn't open {}", path.display())); }
+            if let Err(e) = crate::desktop::open_path(&path) { s.error = Some(format!("Couldn't open {}: {e}", path.display())); }
         }))
         .child(button(k, "Reload", ButtonVariant::Ghost, |s, _| { s.user_css = std::fs::read_to_string(style::user_path()).ok(); s.restyle(); })))];
     if s.user_css.is_some() && !s.css_warnings.is_empty() {
@@ -979,7 +979,7 @@ fn advanced(s: &Settings, k: &Kit, layer: &mut Vec<El>) -> El {
         button(k, if s.doctor.is_some() { "Check Again" } else { "Run Checks" }, ButtonVariant::Neutral, |s, _| {
             s.doctor = Some(String::new());
             s.spawn(|| {
-                let out = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg("doctor").output());
+                let out = std::env::current_exe().and_then(|exe| crate::gpu::scrub(std::process::Command::new(exe).arg("doctor")).output());
                 Msg::Doctor(match out { Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr), Err(e) => e.to_string() })
             });
         }))];
@@ -992,11 +992,11 @@ fn advanced(s: &Settings, k: &Kit, layer: &mut Vec<El>) -> El {
 
     let files = card(k, "files", Some("Files"), vec![
         setting(k, "config-file", "Settings file", Some(&config::config_path().display().to_string()),
-            button(k, "Open", ButtonVariant::Ghost, |s, tx| { if tx.open_url(&format!("file://{}", config::config_path().display())).is_err() { s.error = Some("Couldn't open the settings file".into()); } })),
+            button(k, "Open", ButtonVariant::Ghost, |s, _| { if let Err(e) = crate::desktop::open_path(&config::config_path()) { s.error = Some(format!("Couldn't open the settings file: {e}")); } })),
         setting(k, "dict-folder", "Dictionaries folder", Some(&library::dir().display().to_string()),
-            button(k, "Open", ButtonVariant::Ghost, |s, tx| {
+            button(k, "Open", ButtonVariant::Ghost, |s, _| {
                 let _ = std::fs::create_dir_all(library::dir());
-                if tx.open_url(&format!("file://{}", library::dir().display())).is_err() { s.error = Some("Couldn't open the folder".into()); }
+                if let Err(e) = crate::desktop::open_path(&library::dir()) { s.error = Some(format!("Couldn't open the folder: {e}")); }
             })),
         setting(k, "reset", "Reset all settings", Some("Back to how tlum came. Dictionaries you downloaded stay."),
             if s.confirm_reset {

@@ -82,7 +82,7 @@ const OCR_IDLE: Duration = Duration::from_secs(5 * 60);
 
 /// How long after the popover was last seen everything it held is gone: Rune lets the overlay's
 /// surface go a minute after it hides and the GPU device five minutes after that (`main`).
-const SETTLE: Duration = Duration::from_secs(7 * 60);
+const SETTLE: Duration = Duration::from_secs(8 * 60);
 
 impl Reader {
     /// Starts loading `lang` unless it's loaded or on its way.
@@ -99,8 +99,9 @@ impl Reader {
         if let Reader::Loading(..) = self {
             let Reader::Loading(l, handle, _) = std::mem::replace(self, Reader::None) else { unreachable!() };
             let ocr = handle.join().unwrap_or_else(|_| Err("Tesseract crashed while loading".into()));
-            if let Err(e) = &ocr { eprintln!("tlum: OCR unavailable: {e}"); }
-            *self = Reader::Loaded(l, ocr, Instant::now());
+            // A failure isn't kept: the next lookup tries again (a language pack installed since).
+            let ocr = ocr.inspect_err(|e| eprintln!("tlum: OCR unavailable: {e}"))?;
+            *self = Reader::Loaded(l, Ok(ocr), Instant::now());
         }
         let Reader::Loaded(_, ocr, used) = self else { unreachable!() };
         *used = Instant::now();
@@ -139,9 +140,7 @@ fn worker(engine: Engine, config: Config, kind: desktop::Kind, screens: Vec<Scre
     }
     let mut cx = Ctx { engine, config: Arc::new(config), screens, desktop, ocr: Reader::None, cache: Cache::default() };
     // Tesseract loads for each burst of lookups; say now if it can't.
-    if crate::ocr::tessdata_dir(&cx.config.ocr_language).is_none() {
-        eprintln!("tlum: OCR unavailable: no Tesseract data for '{}' (install your distro's Tesseract language pack)", cx.config.ocr_language);
-    }
+    if let Some(why) = crate::ocr::missing_data(&cx.config.ocr_language) { eprintln!("tlum: OCR unavailable: {why}"); }
     // Open the installed dictionaries ahead of the first lookup.
     let local: Vec<String> = cx.config.active_sources().into_iter().filter(|id| !matches!(id.as_str(), "dictionary" | "thesaurus" | "wikipedia")).collect();
     std::thread::spawn(move || crate::library::warm(&local));

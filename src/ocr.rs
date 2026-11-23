@@ -43,12 +43,47 @@ struct Fns {
     page_bbox: unsafe extern "C" fn(*mut c_void, c_int, *mut c_int, *mut c_int, *mut c_int, *mut c_int) -> c_int,
     page_begins: unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
     delete_text: unsafe extern "C" fn(*const c_char),
+    /// The library the functions are in, kept loaded with them.
+    _lib: libloading::Library,
+}
+
+/// libtesseract, loaded once a process: recognisers come and go (`engine::Reader`), the library
+/// (C++ with static state of its own) stays.
+fn library() -> Result<&'static Fns, String> {
+    static LOADED: std::sync::OnceLock<Fns> = std::sync::OnceLock::new();
+    if let Some(f) = LOADED.get() { return Ok(f); }
+    let lib = find_library()?;
+    // SAFETY: each symbol is looked up by its C API name with the signature from capi.h.
+    let f = unsafe {
+        macro_rules! sym { ($n:literal) => { *lib.get($n).map_err(|e| format!("libtesseract lacks {}: {e}", String::from_utf8_lossy($n)))? } }
+        Fns {
+            create: sym!(b"TessBaseAPICreate"),
+            delete: sym!(b"TessBaseAPIDelete"),
+            init3: sym!(b"TessBaseAPIInit3"),
+            set_psm: sym!(b"TessBaseAPISetPageSegMode"),
+            set_variable: sym!(b"TessBaseAPISetVariable"),
+            set_image: sym!(b"TessBaseAPISetImage"),
+            set_resolution: sym!(b"TessBaseAPISetSourceResolution"),
+            recognize: sym!(b"TessBaseAPIRecognize"),
+            get_iterator: sym!(b"TessBaseAPIGetIterator"),
+            clear: sym!(b"TessBaseAPIClear"),
+            iter_delete: sym!(b"TessResultIteratorDelete"),
+            iter_next: sym!(b"TessResultIteratorNext"),
+            iter_text: sym!(b"TessResultIteratorGetUTF8Text"),
+            iter_conf: sym!(b"TessResultIteratorConfidence"),
+            iter_page: sym!(b"TessResultIteratorGetPageIterator"),
+            page_bbox: sym!(b"TessPageIteratorBoundingBox"),
+            page_begins: sym!(b"TessPageIteratorIsAtBeginningOf"),
+            delete_text: sym!(b"TessDeleteText"),
+            _lib: lib,
+        }
+    };
+    Ok(LOADED.get_or_init(|| f))
 }
 
 /// A loaded, initialised Tesseract. Not `Sync`: one recogniser per thread.
 pub struct Ocr {
-    _lib: libloading::Library,
-    f: Fns,
+    f: &'static Fns,
     api: Api,
 }
 
@@ -83,9 +118,13 @@ fn find_library() -> Result<libloading::Library, String> {
     Err("libtesseract isn't installed (Fedora: tesseract-libs tesseract-langpack-eng; Debian/Ubuntu: libtesseract5 tesseract-ocr-eng; Arch: tesseract tesseract-data-eng)".into())
 }
 
+/// The languages of a setting like `eng+ukr`.
+fn languages(lang: &str) -> impl Iterator<Item = &str> { lang.split('+').map(str::trim).filter(|l| !l.is_empty()) }
+
 /// The folder holding the data for `lang`: every language of one like `eng+ukr`.
 pub fn tessdata_dir(lang: &str) -> Option<String> {
-    let has = |dir: &std::path::Path| lang.split('+').filter(|l| !l.is_empty()).all(|l| dir.join(format!("{l}.traineddata")).exists());
+    languages(lang).next()?;
+    let has = |dir: &std::path::Path| languages(lang).all(|l| dir.join(format!("{l}.traineddata")).exists());
     if let Some(prefix) = std::env::var_os("TESSDATA_PREFIX") {
         let p = std::path::PathBuf::from(prefix);
         for dir in [p.clone(), p.join("tessdata")] {
@@ -93,6 +132,18 @@ pub fn tessdata_dir(lang: &str) -> Option<String> {
         }
     }
     TESSDATA.iter().find(|d| has(std::path::Path::new(d))).map(|d| d.to_string())
+}
+
+/// Why `lang` can't be read, when its data isn't installed: which of its languages are missing.
+pub fn missing_data(lang: &str) -> Option<String> {
+    if tessdata_dir(lang).is_some() { return None; }
+    let installed = installed_languages();
+    let missing: Vec<&str> = languages(lang).filter(|l| !installed.iter().any(|i| i == l)).collect();
+    Some(match missing.len() {
+        0 if languages(lang).next().is_none() => "no text recognition language is chosen".to_string(),
+        0 => format!("the Tesseract data for {} isn't in one folder", lang.replace('+', " and ")),
+        _ => format!("no Tesseract data for {} (install your distro's Tesseract language pack)", missing.join(" or ")),
+    })
 }
 
 /// The Tesseract languages installed (`eng`, `ukr`, …), less the script detector.
@@ -109,32 +160,8 @@ pub fn installed_languages() -> Vec<String> {
 
 impl Ocr {
     pub fn new(lang: &str) -> Result<Ocr, String> {
-        let lib = find_library()?;
-        // SAFETY: each symbol is looked up by its C API name with the signature from capi.h.
-        let f = unsafe {
-            macro_rules! sym { ($n:literal) => { *lib.get($n).map_err(|e| format!("libtesseract lacks {}: {e}", String::from_utf8_lossy($n)))? } }
-            Fns {
-                create: sym!(b"TessBaseAPICreate"),
-                delete: sym!(b"TessBaseAPIDelete"),
-                init3: sym!(b"TessBaseAPIInit3"),
-                set_psm: sym!(b"TessBaseAPISetPageSegMode"),
-                set_variable: sym!(b"TessBaseAPISetVariable"),
-                set_image: sym!(b"TessBaseAPISetImage"),
-                set_resolution: sym!(b"TessBaseAPISetSourceResolution"),
-                recognize: sym!(b"TessBaseAPIRecognize"),
-                get_iterator: sym!(b"TessBaseAPIGetIterator"),
-                clear: sym!(b"TessBaseAPIClear"),
-                iter_delete: sym!(b"TessResultIteratorDelete"),
-                iter_next: sym!(b"TessResultIteratorNext"),
-                iter_text: sym!(b"TessResultIteratorGetUTF8Text"),
-                iter_conf: sym!(b"TessResultIteratorConfidence"),
-                iter_page: sym!(b"TessResultIteratorGetPageIterator"),
-                page_bbox: sym!(b"TessPageIteratorBoundingBox"),
-                page_begins: sym!(b"TessPageIteratorIsAtBeginningOf"),
-                delete_text: sym!(b"TessDeleteText"),
-            }
-        };
-        let data = tessdata_dir(lang).ok_or_else(|| format!("no {lang}.traineddata (install your distro's Tesseract language pack for '{lang}')"))?;
+        let f = library()?;
+        let data = tessdata_dir(lang).ok_or_else(|| missing_data(lang).unwrap_or_default())?;
         let c_data = CString::new(data).unwrap();
         let c_lang = CString::new(lang).map_err(|_| "bad language".to_string())?;
         // SAFETY: plain C calls on a handle we own; strings outlive the calls.
@@ -150,7 +177,7 @@ impl Ocr {
                 let (k, v) = (CString::new(k).unwrap(), CString::new(v).unwrap());
                 (f.set_variable)(api, k.as_ptr(), v.as_ptr());
             }
-            Ok(Ocr { _lib: lib, f, api })
+            Ok(Ocr { f, api })
         }
     }
 

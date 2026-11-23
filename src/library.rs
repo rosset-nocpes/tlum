@@ -123,7 +123,12 @@ static OPEN: Mutex<Vec<(String, Arc<Result<Book, String>>)>> = Mutex::new(Vec::n
 
 fn open(id: &str) -> Arc<Result<Book, String>> {
     let mut all = OPEN.lock().unwrap();
-    if let Some((_, b)) = all.iter().find(|(i, _)| i == id) { return b.clone(); }
+    if let Some((_, b)) = all.iter().find(|(i, _)| i == id) {
+        let changed = match &**b { Ok(Book::WordNet(w)) => w.changed(), Ok(Book::StarDict(s)) => s.changed(), Err(_) => false };
+        // Its files were copied over or replaced: read them afresh (`Mapped::changed`).
+        if !changed { return b.clone(); }
+        all.retain(|(i, _)| i != id);
+    }
     let path = dir().join(id);
     let kind = std::fs::read_to_string(path.join("tlum.json")).ok().and_then(|m| serde_json::from_str::<Installed>(&m).ok()).map(|m| m.kind);
     let book = Arc::new(match kind {

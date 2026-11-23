@@ -190,7 +190,7 @@ pub fn on_key(s: &mut Popover, e: &KeyEvent, tx: &mut Tx) -> bool {
         }
         Key::Enter => {
             if let Some(url) = s.shown.as_ref().and_then(|v| v.sections.iter().find_map(|s| s.url().map(str::to_string))) {
-                let _ = tx.open_url(&url);
+                if let Err(e) = crate::desktop::open_link(&url) { eprintln!("tlum: {e}"); }
                 dismiss(s);
             }
             true
@@ -252,7 +252,7 @@ fn section_from(t: &Theme, label: &str, url: Option<&str>, from: Option<&str>, l
         let mut link = txt(&t.link, format!("{} ↗", link_name(url)), f);
         if live {
             let url = url.to_string();
-            link = link.cursor(rune::Cursor::Pointer).on_press_tx(move |s: &mut Popover, tx| { let _ = tx.open_url(&url); dismiss(s); });
+            link = link.cursor(rune::Cursor::Pointer).on_press(move |s: &mut Popover| { if let Err(e) = crate::desktop::open_link(&url) { eprintln!("tlum: {e}"); } dismiss(s); });
         }
         header = header.child(link);
     }
@@ -341,7 +341,7 @@ fn hidden(t: &Theme, s: &Section) -> bool {
 pub fn open_settings() {
     let Ok(exe) = std::env::current_exe() else { return };
     let null = std::process::Stdio::null;
-    match std::process::Command::new(exe).arg("settings").stdin(null()).stdout(null()).spawn() {
+    match crate::gpu::scrub(std::process::Command::new(exe).arg("settings").stdin(null()).stdout(null())).spawn() {
         // Reap it when it closes.
         Ok(mut child) => { std::thread::spawn(move || child.wait()); }
         Err(e) => eprintln!("tlum: couldn't open the settings: {e}"),

@@ -27,11 +27,11 @@ struct Lines {
 }
 
 impl Lines {
-    /// A missing file is an empty list (`required` says it may not be).
+    /// A file that can't be read is an empty list, unless it's `required`.
     fn open(path: &Path, required: bool) -> Result<Lines, String> {
         let text = match crate::mapped::Mapped::open(path) {
             Ok(t) => t,
-            Err(_) if !required && !path.exists() => return Ok(Lines { text: crate::mapped::Mapped::empty(), starts: Vec::new() }),
+            Err(_) if !required => return Ok(Lines { text: crate::mapped::Mapped::empty(), starts: Vec::new() }),
             Err(e) => return Err(e),
         };
         if text.len() > u32::MAX as usize { return Err(format!("{} is too large", path.display())); }
@@ -87,6 +87,9 @@ impl WordNet {
         }
         Ok(WordNet { dir: dir.to_path_buf(), index, exceptions })
     }
+
+    /// Whether an index or exception list changed on disk since it was opened.
+    pub fn changed(&self) -> bool { self.index.iter().chain(&self.exceptions).any(|l| l.text.changed()) }
 
     /// The index line for `lemma` under part of speech `p`.
     fn entry(&self, p: usize, lemma: &str) -> Option<&str> {
@@ -227,6 +230,24 @@ mod tests {
     }
 
     /// Runs against a real WordNet when `TLUM_WORDNET` points at one.
+    #[test]
+    fn sorted_lines_find_every_line_of_a_key() {
+        let dir = std::env::temp_dir().join(format!("tlum-lines-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("noun.exc");
+        // A header line led by spaces, an empty line, CRLF, a repeated key, out of order, and
+        // no newline at the end.
+        std::fs::write(&path, "  1 licence text\n\nmice mouse\r\naxes ax\naxes axis\ngeese goose").unwrap();
+        let l = Lines::open(&path, true).unwrap();
+        assert_eq!(l.find("axes").collect::<Vec<_>>(), ["axes ax", "axes axis"]);
+        assert_eq!(l.find("geese").collect::<Vec<_>>(), ["geese goose"]);
+        assert_eq!(l.find("mice").collect::<Vec<_>>(), ["mice mouse\r"]);
+        assert_eq!(l.find("licence").count() + l.find("").count() + l.find("ax").count(), 0);
+        assert!(Lines::open(&dir.join("missing"), false).unwrap().find("axes").next().is_none());
+        assert!(Lines::open(&dir.join("missing"), true).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn looks_up_a_real_wordnet() {
         let Some(dir) = std::env::var_os("TLUM_WORDNET") else { return };

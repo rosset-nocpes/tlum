@@ -327,7 +327,7 @@ static GESTURES: std::sync::RwLock<gesture::Settings> = std::sync::RwLock::new(g
 fn restart() {
     use std::os::unix::process::CommandExt;
     let Ok(exe) = std::env::current_exe() else { return };
-    let e = std::process::Command::new(exe).args(std::env::args_os().skip(1)).exec();
+    let e = gpu::scrub(std::process::Command::new(exe).args(std::env::args_os().skip(1))).exec();
     eprintln!("tlum: couldn't restart: {e}");
 }
 

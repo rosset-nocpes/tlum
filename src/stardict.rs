@@ -64,6 +64,9 @@ impl StarDict {
         })
     }
 
+    /// Whether the index changed on disk since it was opened.
+    pub fn changed(&self) -> bool { self.idx.changed() }
+
     fn word(&self, i: usize) -> &[u8] {
         let s = self.starts[i] as usize;
         let nul = self.idx[s..].iter().position(|b| *b == 0).unwrap_or(0);
