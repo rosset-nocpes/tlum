@@ -44,8 +44,11 @@ pub struct Shown {
     pub marker: Option<(Pixels, Pixels)>,
     /// The display's size in points.
     pub screen: [f32; 2],
-    /// Where the overlay surface starts on the display, when the desktop says.
+    /// Where the overlay surface starts on the display, once measured (`calibrate`).
     pub offset: Option<[f32; 2]>,
+    /// The display minus panels, in its points, when the desktop says: the popover stays
+    /// inside it, though the surface covers the panels too.
+    pub area: Option<[f32; 4]>,
     /// The pointer when triggered, in the display's points: the overlay's first pointer event
     /// tells where its surface starts when the desktop doesn't.
     pub pointer: [f32; 2],
@@ -60,10 +63,10 @@ static OFFSETS: Mutex<Vec<Option<[f32; 2]>>> = Mutex::new(Vec::new());
 
 fn cached_offset(display: usize) -> Option<[f32; 2]> { OFFSETS.lock().unwrap().get(display).copied().flatten() }
 
-/// The surface's offset into the display. A layer surface that doesn't claim an exclusive
-/// zone is kept out of panels' zones, so it's smaller than the display by their size; which
-/// side they're on only the desktop knows, or the pointer shows (`calibrate`). Until then a
-/// top bar is the likelier guess.
+/// The surface's offset into the display. Rune's full-screen layer surface claims exclusive
+/// zone -1, so it covers panels and starts at the display's corner. A surface that is kept out
+/// of panels' zones instead is smaller than the display by their size; which side they're on
+/// the pointer shows (`calibrate`), and until then a top bar is the likelier guess.
 fn offset(s: &Popover, v: &Shown) -> [f32; 2] {
     if let Some(o) = v.offset.or_else(|| cached_offset(s.display)) { return o; }
     match s.size {
@@ -344,7 +347,14 @@ pub fn view(s: &Popover, cx: &mut Cx<Popover>) -> El {
     let off = offset(s, v);
     let surface = s.size.unwrap_or([v.screen[0] - off[0], v.screen[1] - off[1]]);
     let word = [v.word[0] - off[0], v.word[1] - off[1], v.word[2], v.word[3]];
-    let (left, below, arrow_x, room) = place(word, surface, &t);
+    // The popover keeps off panels: it fits the desktop's work area where it says, on the surface.
+    let fit = v.area.map_or([0.0, 0.0, surface[0], surface[1]], |a| {
+        let (x0, y0) = ((a[0] - off[0]).max(0.0), (a[1] - off[1]).max(0.0));
+        let (x1, y1) = ((a[0] + a[2] - off[0]).min(surface[0]), (a[1] + a[3] - off[1]).min(surface[1]));
+        [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)]
+    });
+    let (left, below, arrow_x, room) = place([word[0] - fit[0], word[1] - fit[1], word[2], word[3]], [fit[2], fit[3]], &t);
+    let left = left + fit[0];
     let (w, arrow_h) = (t.popover.width, if t.arrow.hidden { 0.0 } else { t.arrow.height });
 
     let scroll = s.scroll.clone();
@@ -444,6 +454,28 @@ mod tests {
                 assert!((p[1] - p0[1]).abs() < 1.0, "popover moved vertically");
             }
         }
+    }
+
+    /// The surface covers the panels (exclusive zone -1), so the marker sits on the word itself;
+    /// the work area only keeps the popover clear of the panels.
+    #[test]
+    fn a_top_panel_neither_shifts_the_marker_nor_takes_the_popover() {
+        let panel = 32.0;
+        let mut state = crate::preview::init();
+        let v = state.shown.as_mut().unwrap();
+        let word = v.word;
+        v.offset = None;
+        v.area = Some([0.0, panel, 1000.0, 680.0 - panel]);
+        // A word just under the panel: room above it is all panel, so the popover hangs below.
+        v.word = [word[0], panel + 4.0, word[2], word[3]];
+        let at = v.word;
+        let mut rt = Runtime::new(state, view, (1000.0, 680.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        settle(&mut rt);
+        let m = rt.presented("lu-marker-1").expect("marker").0;
+        assert!((m[0] - at[0]).abs() < 0.5 && (m[1] - at[1]).abs() < 0.5, "marker at {m:?}, word at {at:?}");
+        let p = rt.presented("lu-pop-1").expect("popover").0;
+        assert!(p[1] >= at[1] + at[3], "popover hangs below the word, clear of the panel: {p:?}");
     }
 
     #[test]

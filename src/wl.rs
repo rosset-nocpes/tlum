@@ -104,6 +104,14 @@ pub struct Wayland {
     nudge: Option<ZwlrVirtualPointerManagerV1>,
 }
 
+/// Whether the compositor offers layer-shell. Rune's overlays use it when it's there and fall
+/// back to XWayland (GNOME) when it isn't.
+pub fn has_layer_shell() -> bool {
+    let Ok(conn) = Connection::connect_to_env() else { return false };
+    registry_queue_init::<State>(&conn)
+        .is_ok_and(|(globals, _)| globals.contents().with_list(|l| l.iter().any(|g| g.interface == ZwlrLayerShellV1::interface().name)))
+}
+
 impl Wayland {
     pub fn connect() -> Result<Wayland, String> {
         let conn = Connection::connect_to_env().map_err(|e| format!("no Wayland display: {e}"))?;

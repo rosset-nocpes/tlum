@@ -34,8 +34,7 @@ pub struct Pointer {
     /// The output's logical rect.
     pub screen: Option<[f64; 4]>,
     pub scale: f64,
-    /// The output minus panels' exclusive zones: where a full-screen layer surface with no
-    /// exclusive zone of its own (Rune's overlay) is placed.
+    /// The output minus panels' exclusive zones, which the popover keeps inside.
     pub area: Option<[f64; 4]>,
 }
 

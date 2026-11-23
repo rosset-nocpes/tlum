@@ -49,7 +49,7 @@ fn marker() -> (Pixels, Pixels) {
 fn shown(word: [f32; 4], definition: Part<Definition>, wiki: Part<Wiki>) -> Shown {
     Shown {
         generation: 1, query: "serendipity".into(), word, marker: Some(marker()), screen: [SIZE.0, SIZE.1],
-        offset: Some([0.0, 0.0]), pointer: [word[0] + 20.0, word[1] + 10.0], shown_at: std::time::Instant::now(),
+        offset: Some([0.0, 0.0]), area: None, pointer: [word[0] + 20.0, word[1] + 10.0], shown_at: std::time::Instant::now(),
         definition, wiki, thumbnail: None,
     }
 }

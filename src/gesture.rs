@@ -11,8 +11,8 @@
 //! down, as macOS shows the popover on the deep press, and moving on with the button held
 //! (a drag that began with a pause) takes the popover back.
 //!
-//! Two-finger scrolls and wheel turns are reported too, for scrolling the popover, which as a
-//! layer-shell surface gets no wheel events of its own.
+//! Two-finger scrolls and wheel turns are reported too, for scrolling the popover where it gets
+//! no wheel events of its own: as an XWayland window, on Wayland without layer-shell (GNOME).
 
 pub const BTN_LEFT: u16 = 0x110;
 pub const BTN_MIDDLE: u16 = 0x112;

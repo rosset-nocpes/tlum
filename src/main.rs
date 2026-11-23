@@ -182,6 +182,12 @@ fn daemon() {
         let mut app = App::new(preview::spec()).windowless();
         let mut handles = Vec::new();
         let mut screens = Vec::new();
+        // Rune scrolls the popover from the wheel and touchpad itself, on layer-shell and on X11.
+        // An XWayland overlay (Wayland without layer-shell: GNOME) gets no wheel events, so
+        // there the input thread scrolls it from evdev instead.
+        let wayland = displays.iter().any(|d| matches!(d.native_id(), Some(rune::NativeDisplayId::Wayland(_))));
+        let evdev_scroll = wayland && !wl::has_layer_shell();
+        eprintln!("tlum: popover scrolls from {}", if evdev_scroll { "evdev (XWayland overlay)" } else { "the compositor" });
         for (i, d) in displays.iter().enumerate() {
             let state = Popover { display: i, ..Popover::default() };
             let target = d.id.clone().map_or(DisplayTarget::Primary, DisplayTarget::Id);
@@ -218,7 +224,7 @@ fn daemon() {
         style::watch(|| if let Some(all) = ui::OVERLAYS.get() { for o in all { o.update(|_, _| {}); } });
         let gestures = config.gestures();
         let e = engine.clone();
-        std::thread::Builder::new().name("input".into()).spawn(move || input::run(gestures, move |fx, dev| on_gesture(&e, fx, dev))).unwrap();
+        std::thread::Builder::new().name("input".into()).spawn(move || input::run(gestures, move |fx, dev| on_gesture(&e, fx, dev, evdev_scroll))).unwrap();
         // Keep the connection (and with it the service and its name) for the life of the app.
         std::mem::forget(conn);
         vec![WindowSpec::from_app("tlum", app)]
@@ -244,7 +250,9 @@ fn register_shortcut(kind: desktop::Kind, conn: &zbus::blocking::Connection, key
     }
 }
 
-fn on_gesture(engine: &Engine, fx: Effect, device: &str) {
+/// `evdev_scroll`: whether wheel and two-finger scrolls read from evdev scroll the popover, which
+/// only an XWayland overlay needs.
+fn on_gesture(engine: &Engine, fx: Effect, device: &str, evdev_scroll: bool) {
     match fx {
         Effect::Trigger(source) => {
             let why = match source {
@@ -257,6 +265,7 @@ fn on_gesture(engine: &Engine, fx: Effect, device: &str) {
             engine.send(Job::Trigger(None, why));
         }
         Effect::Dragged => engine.dragged(),
+        Effect::Scroll(_) if !evdev_scroll => {}
         Effect::Scroll(dy) => {
             let Some((_, display)) = *ui::VISIBLE.lock().unwrap() else { return };
             if let Some(o) = ui::OVERLAYS.get().and_then(|v| v.get(display)) {

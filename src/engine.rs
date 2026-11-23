@@ -183,15 +183,13 @@ fn text(cx: &mut Ctx, t: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Shows the popover. Positions go to the overlay relative to its output; the overlay
-/// subtracts where its surface starts (below a top panel, say), which `p.area` tells when the
-/// desktop knows and the overlay measures otherwise.
+/// Shows the popover. Positions go to the overlay relative to its output, with the output's
+/// panel-free area (`p.area`) when the desktop knows it, for the popover to stay inside.
 type Baked = (u32, u32, Vec<u8>, [f64; 4]);
 
 fn show(cx: &mut Ctx, display: usize, p: &Pointer, query: String, rect: [f64; 4], marker: Option<(Baked, Option<Baked>)>) {
     let Some(overlay) = ui::OVERLAYS.get().and_then(|v| v.get(display)).cloned() else { return };
     let screen = p.screen.unwrap_or([0.0, 0.0, 1920.0, 1080.0]);
-    let offset = p.area.map(|a| [(a[0] - screen[0]) as f32, (a[1] - screen[1]) as f32]);
     let pointer = [(p.x - screen[0]) as f32, (p.y - screen[1]) as f32];
     // No compositor: the overlay can't be see-through, so it shows the screen as it is now.
     if cx.desktop.as_mut().is_ok_and(|d| d.opaque_overlays()) {
@@ -218,7 +216,7 @@ fn show(cx: &mut Ctx, display: usize, p: &Pointer, query: String, rect: [f64; 4]
     let (definition, wiki) = cached.clone().unwrap_or((Part::Loading, Part::Loading));
     let shown = Shown {
         generation, query: query.clone(), word, marker: pixels, screen: [screen[2] as f32, screen[3] as f32],
-        offset, pointer, shown_at: Instant::now(), definition, wiki, thumbnail: None,
+        offset: None, area: p.area.map(local), pointer, shown_at: Instant::now(), definition, wiki, thumbnail: None,
     };
     overlay.update(move |s: &mut Popover, _| { s.hover = false; s.shown = Some(shown); });
     overlay.set_input(rune::OverlayInput::All);

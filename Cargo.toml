@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 # Rune is pre-release: pin a dev rev and patch the crates it patches, from the same rev
 # (Rune's README, "Depending on Rune").
-rune = { git = "https://github.com/anomalyco/rune", rev = "44920b1fdfe6d1b7156d80b90f0ca0d96080d2bf", features = ["tooling"] }
+rune = { git = "https://github.com/anomalyco/rune", rev = "9a915b1face3445afd025059eabc190977db6f24", features = ["tooling"] }
 zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
 wl-clipboard-rs = "0.9"
 wayland-client = "0.31"
@@ -28,12 +28,12 @@ png = "0.18"
 urlencoding = "2"
 
 [patch.crates-io]
-winit = { git = "https://github.com/anomalyco/rune", rev = "44920b1fdfe6d1b7156d80b90f0ca0d96080d2bf" }
-sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "44920b1fdfe6d1b7156d80b90f0ca0d96080d2bf" }
-parley_engine = { git = "https://github.com/anomalyco/rune", rev = "44920b1fdfe6d1b7156d80b90f0ca0d96080d2bf" }
-wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "44920b1fdfe6d1b7156d80b90f0ca0d96080d2bf" }
-accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "44920b1fdfe6d1b7156d80b90f0ca0d96080d2bf" }
-accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "44920b1fdfe6d1b7156d80b90f0ca0d96080d2bf" }
+winit = { git = "https://github.com/anomalyco/rune", rev = "9a915b1face3445afd025059eabc190977db6f24" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "9a915b1face3445afd025059eabc190977db6f24" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "9a915b1face3445afd025059eabc190977db6f24" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "9a915b1face3445afd025059eabc190977db6f24" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "9a915b1face3445afd025059eabc190977db6f24" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "9a915b1face3445afd025059eabc190977db6f24" }
 
 [profile.dev]
 debug = "line-tables-only"
