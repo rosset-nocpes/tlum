@@ -171,14 +171,18 @@ impl Settings {
     }
 }
 
-/// The window's session bus connection, opened once: the status check asks every few seconds.
+/// The window's session bus connection, opened once it can be: the status check asks every
+/// few seconds, and tries again while the bus can't be reached.
 fn bus() -> Option<&'static zbus::blocking::Connection> {
-    static BUS: std::sync::OnceLock<Option<zbus::blocking::Connection>> = std::sync::OnceLock::new();
-    BUS.get_or_init(|| zbus::blocking::Connection::session().ok()).as_ref()
+    static BUS: std::sync::OnceLock<zbus::blocking::Connection> = std::sync::OnceLock::new();
+    if let Some(c) = BUS.get() { return Some(c); }
+    let c = zbus::blocking::Connection::session().ok()?;
+    Some(BUS.get_or_init(|| c))
 }
 
 fn daemon_running() -> bool {
-    bus().and_then(|c| zbus::blocking::fdo::DBusProxy::new(c).ok().and_then(|d| d.name_has_owner(crate::kwin::SERVICE.try_into().ok()?).ok()))
+    bus().and_then(|c| c.call_method(Some("org.freedesktop.DBus"), "/org/freedesktop/DBus", Some("org.freedesktop.DBus"), "NameHasOwner", &(crate::kwin::SERVICE,)).ok())
+        .and_then(|reply| reply.body().deserialize::<bool>().ok())
         .unwrap_or(false)
 }
 
@@ -203,13 +207,7 @@ fn poll(s: &mut Settings, _: f64, tx: &mut Tx) -> bool {
     let mut changed = false;
     for m in msgs {
         // The status check comes every few seconds and mostly finds nothing new.
-        if let Msg::Running(on) = m {
-            changed |= s.running != Some(on) || s.busy;
-            s.running = Some(on);
-            s.busy = false;
-            continue;
-        }
-        changed = true;
+        changed |= !matches!(m, Msg::Running(on) if s.running == Some(on) && !s.busy);
         match m {
             Msg::Catalog(c) => s.catalog = Some(c),
             Msg::Installed(id, r) => {
@@ -226,7 +224,7 @@ fn poll(s: &mut Settings, _: f64, tx: &mut Tx) -> bool {
                 Err(e) => s.error = Some(e),
             },
             Msg::Doctor(out) => s.doctor = Some(out),
-            Msg::Running(_) => {}
+            Msg::Running(on) => { s.running = Some(on); s.busy = false; }
         }
     }
     // Downloads report progress through the shared map; redraw while any runs.

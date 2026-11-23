@@ -267,6 +267,8 @@ static THUMBNAILS: Mutex<Vec<(String, Vec<u8>)>> = Mutex::new(Vec::new());
 fn thumbnail_bytes(url: &str) -> Option<Vec<u8>> {
     if let Some((_, b)) = THUMBNAILS.lock().unwrap().iter().find(|(u, _)| u == url) { return Some(b.clone()); }
     let bytes = dict::get_bytes(url).ok()?;
+    // Thumbnails are tens of KB; an occasional large one (an animation) isn't worth holding.
+    if bytes.len() > 1 << 20 { return Some(bytes); }
     let mut all = THUMBNAILS.lock().unwrap();
     all.retain(|(u, _)| u != url);
     all.push((url.to_string(), bytes.clone()));

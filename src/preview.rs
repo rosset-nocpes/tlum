@@ -91,7 +91,7 @@ fn view(s: &Popover, cx: &mut Cx<Popover>) -> El {
     let before = text("Few discoveries are planned; most are").font(PAGE).color(ink).single_line()
         .pin(None, Some(y), Some(SIZE.0 - word[0] + 1.0), None);
     let after = text("and luck.").font(PAGE).color(ink).single_line().pin(Some(word[0] + word[2] + 5.0), Some(y), None, None);
-    let label = text("serendipity").font(PAGE).color({ let m = crate::style::theme(dark).marker; if m.hidden { ink } else { m.ink.color() } }).single_line().pin(Some(word[0] + 4.0), Some(y), None, None);
+    let label = text("serendipity").font(PAGE).color({ let t = crate::style::themes(); let m = if dark { &t.1.marker } else { &t.0.marker }; if m.hidden { ink } else { m.ink.color() } }).single_line().pin(Some(word[0] + 4.0), Some(y), None, None);
     el().w_full().h_full().fill(bg).child(before).child(after).child(ui::view(s, cx).pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))).child(label)
 }
 
