@@ -10,9 +10,9 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use rune::{Cx, El, Key, KeyEvent, OverlayHandle, Pixels, ScrollPos, ScrollSpec, Shape, Span, Spring, SpringPair, SurfaceFit, Transition, Tx, canvas, col, el, rich, row, text};
+use rune::{Cx, El, Key, KeyEvent, OverlayHandle, Pixels, ScrollPos, ScrollSpec, Shape, Span, Spring, SpringPair, SurfaceFit, Transition, Tx, canvas, col, el, icon, rich, row, text};
 
-use crate::dict::{Definition, Part, Wiki};
+use crate::dict::{Definition, Entry, Kind, Part, Section, Wiki};
 use crate::style::{Text, Theme};
 
 /// The popover keeps this far from the screen's edges.
@@ -53,8 +53,8 @@ pub struct Shown {
     /// tells where its surface starts when the desktop doesn't.
     pub pointer: [f32; 2],
     pub shown_at: std::time::Instant,
-    pub definition: Part<Definition>,
-    pub wiki: Part<Wiki>,
+    /// One per source, in the settings' order, each filling in as it arrives.
+    pub sections: Vec<Section>,
     pub thumbnail: Option<rune::Image>,
 }
 
@@ -189,7 +189,7 @@ pub fn on_key(s: &mut Popover, e: &KeyEvent, tx: &mut Tx) -> bool {
             true
         }
         Key::Enter => {
-            if let Some(url) = s.shown.as_ref().and_then(|v| v.definition.found().map(|d| d.url.clone()).or_else(|| v.wiki.found().map(|w| w.url.clone()))) {
+            if let Some(url) = s.shown.as_ref().and_then(|v| v.sections.iter().find_map(|s| s.url().map(str::to_string))) {
                 let _ = tx.open_url(&url);
                 dismiss(s);
             }
@@ -232,13 +232,29 @@ pub fn place(word: [f32; 4], screen: [f32; 2], t: &Theme) -> (f32, bool, f32, f3
     (left, below, arrow, if below { below_room } else { above_room }.min(t.popover.max_height).max(80.0))
 }
 
-fn section(t: &Theme, label: &str, link: Option<(&'static str, String)>) -> El {
+/// What a section's link says, from where it goes.
+fn link_name(url: &str) -> &'static str {
+    if url.contains("wiktionary.org") { "Wiktionary" } else if url.contains("wikipedia.org") { "Wikipedia" } else { "Open" }
+}
+
+/// A section's title row, with its link. `live`: the link opens (the settings' preview draws
+/// the popover without handlers).
+fn section(t: &Theme, label: &str, url: Option<&str>, live: bool) -> El { section_from(t, label, url, None, live) }
+
+/// [`section`], naming the dictionary that answered (`from`) in place of the link.
+fn section_from(t: &Theme, label: &str, url: Option<&str>, from: Option<&str>, live: bool) -> El {
     let f = t.popover.family;
     let mut header = row().w_full().justify_between().center_y();
     if !t.section_title.hidden { header = header.child(txt(&t.section_title, label, f)); } else { header = header.child(el()); }
-    if let Some((name, url)) = link.filter(|_| !t.link.hidden) {
-        header = header.child(txt(&t.link, format!("{name} ↗"), f).cursor(rune::Cursor::Pointer)
-            .on_press_tx(move |s: &mut Popover, tx| { let _ = tx.open_url(&url); dismiss(s); }));
+    if let Some(from) = from.filter(|_| !t.section_title.hidden) {
+        header = header.child(txt(&t.section_title, from, f).max_lines(1).truncate().min_w(0.0).pl(12.0));
+    } else if let Some(url) = url.filter(|_| !t.link.hidden) {
+        let mut link = txt(&t.link, format!("{} ↗", link_name(url)), f);
+        if live {
+            let url = url.to_string();
+            link = link.cursor(rune::Cursor::Pointer).on_press_tx(move |s: &mut Popover, tx| { let _ = tx.open_url(&url); dismiss(s); });
+        }
+        header = header.child(link);
     }
     header
 }
@@ -255,9 +271,9 @@ fn sense_row(t: &Theme, n: usize, sense: &crate::dict::Sense) -> El {
     c
 }
 
-fn dictionary(t: &Theme, d: &Definition) -> El {
+fn dictionary(t: &Theme, title: &str, d: &Definition, live: bool) -> El {
     let f = t.popover.family;
-    let mut c = col().w_full().gap(8.0).child(section(t, "Dictionary", Some(("Wiktionary", d.url.clone()))));
+    let mut c = col().w_full().gap(8.0).child(section_from(t, title, (!d.url.is_empty()).then_some(d.url.as_str()), d.source.as_deref(), live));
     let mut head = row().gap(10.0).center_y();
     if !t.headword.hidden { head = head.child(txt(&t.headword, &d.headword, f)); }
     if let Some(ph) = d.phonetic.as_ref().filter(|_| !t.pronunciation.hidden) {
@@ -267,7 +283,7 @@ fn dictionary(t: &Theme, d: &Definition) -> El {
     if let Some(note) = d.note.as_ref().filter(|_| !t.note.hidden) { c = c.child(txt(&t.note, note, f).wrap()); }
     for m in d.meanings.iter().take(5) {
         let mut senses = col().w_full().gap(6.0);
-        if !t.part_of_speech.hidden { senses = senses.child(txt(&t.part_of_speech, &m.part_of_speech, f)); }
+        if !t.part_of_speech.hidden && !m.part_of_speech.is_empty() { senses = senses.child(txt(&t.part_of_speech, &m.part_of_speech, f)); }
         if !t.sense.hidden {
             for (i, s) in m.senses.iter().take(t.senses.max(1)).enumerate() { senses = senses.child(sense_row(t, i + 1, s)); }
         }
@@ -276,11 +292,11 @@ fn dictionary(t: &Theme, d: &Definition) -> El {
     c
 }
 
-fn thesaurus(t: &Theme, d: &Definition) -> Option<El> {
-    if t.hide_thesaurus || t.synonyms.hidden { return None; }
+fn thesaurus(t: &Theme, title: &str, d: &Definition) -> Option<El> {
+    if t.synonyms.hidden { return None; }
     let label = &t.synonyms_label;
     let rows: Vec<El> = d.meanings.iter().filter(|m| !m.synonyms.is_empty() || !m.antonyms.is_empty()).take(4).map(|m| {
-        let lead = if label.hidden { String::new() } else { format!("{}  ", m.part_of_speech) };
+        let lead = if label.hidden || m.part_of_speech.is_empty() { String::new() } else { format!("{}  ", m.part_of_speech) };
         let mut body = format!("{lead}{}", m.synonyms.iter().take(10).cloned().collect::<Vec<_>>().join(", "));
         let mut spans = if lead.is_empty() { vec![] } else { vec![span(label, 0, lead.len(), &t.synonyms)] };
         if !m.antonyms.is_empty() {
@@ -292,12 +308,12 @@ fn thesaurus(t: &Theme, d: &Definition) -> Option<El> {
         rich(body, spans).font(t.synonyms.style(t.popover.family)).color(t.synonyms.color.color()).wrap()
     }).collect();
     if rows.is_empty() { return None; }
-    let mut c = col().w_full().gap(6.0).child(section(t, "Thesaurus", None));
+    let mut c = col().w_full().gap(6.0).child(section(t, title, None, false));
     for r in rows { c = c.child(r); }
     Some(c)
 }
 
-fn wikipedia(t: &Theme, w: &Wiki, thumb: Option<&rune::Image>) -> El {
+fn wikipedia(t: &Theme, title: &str, w: &Wiki, thumb: Option<&rune::Image>, live: bool) -> El {
     let f = t.popover.family;
     let mut words = col().grow(1.0).min_w(0.0).gap(4.0);
     if !t.wiki_title.hidden { words = words.child(txt(&t.wiki_title, &w.title, f).wrap()); }
@@ -311,39 +327,73 @@ fn wikipedia(t: &Theme, w: &Wiki, thumb: Option<&rune::Image>) -> El {
         body = body.child(el().size(t.thumbnail.width, t.thumbnail.height).radius(t.thumbnail.radius)
             .pixels_fit(img.pixels(), SurfaceFit::Fill).transition(Transition::opacity()));
     }
-    col().w_full().gap(8.0).child(section(t, "Wikipedia", Some(("Wikipedia", w.url.clone())))).child(body)
+    col().w_full().gap(8.0).child(section(t, title, Some(&w.url), live)).child(body)
 }
 
 fn status(t: &Theme, s: &str) -> El { txt(&t.status, s, t.popover.family).wrap() }
 
-fn content(t: &Theme, v: &Shown) -> El {
+/// Whether the style hides a section (`.dictionary`, `.thesaurus`, `.wikipedia { display: none }`).
+fn hidden(t: &Theme, s: &Section) -> bool {
+    match s.kind { Kind::Dictionary => t.hide_dictionary, Kind::Thesaurus => t.hide_thesaurus, Kind::Wikipedia => t.hide_wikipedia }
+}
+
+/// Opens tlum's settings window (or brings it forward, when it's open).
+pub fn open_settings() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let null = std::process::Stdio::null;
+    match std::process::Command::new(exe).arg("settings").stdin(null()).stdout(null()).spawn() {
+        // Reap it when it closes.
+        Ok(mut child) => { std::thread::spawn(move || child.wait()); }
+        Err(e) => eprintln!("tlum: couldn't open the settings: {e}"),
+    }
+}
+
+/// "Settings…" at the end of the popover, as macOS's Look Up has.
+fn footer(t: &Theme, live: bool) -> El {
+    let f = &t.footer;
+    let mut b = row().key("lu-settings").gap(5.0).center_y().radius(5.0).px(4.0).py(2.0).ml(-4.0).label("Settings").role("button")
+        .child(icon(&crate::icons::GEAR, (f.size + 1.0).round()).color(f.color.color()).a11y_hidden())
+        .child(txt(f, "Settings…", t.popover.family).a11y_hidden());
+    if live {
+        b = b.cursor(rune::Cursor::Pointer).hover(f.color.color().alpha(0.12))
+            .on_press(|s: &mut Popover| { dismiss(s); open_settings(); });
+    }
+    row().w_full().child(b)
+}
+
+/// The sections that have something, in order. Until one does: the word and "Looking up…";
+/// when none has anything: why.
+fn content(t: &Theme, v: &Shown, live: bool) -> El {
     let p = &t.popover;
     let mut c = col().w_full().gap(p.gap).pt(p.padding[0]).pr(p.padding[1]).pb(p.padding[2]).pl(p.padding[3]);
     let rule = || if t.rule.hidden { None } else { Some(el().w_full().h(t.rule.height).fill(t.rule.color.color())) };
-    let mut any = false;
     let add = |c: El, part: El, sep: bool| -> El { let c = if sep && let Some(r) = rule() { c.child(r) } else { c }; c.child(part) };
-    let definition = if t.hide_dictionary { &Part::Missing } else { &v.definition };
-    match definition {
-        Part::Found(d) => {
-            c = add(c, dictionary(t, d), false);
-            any = true;
-            if let Some(th) = thesaurus(t, d) { c = add(c, th, true); }
-        }
-        Part::Loading => c = add(c, col().gap(8.0).child(section(t, "Dictionary", None)).child(txt(&t.headword, &v.query, p.family)).child(status(t, "Looking up…")), false),
-        Part::Failed(e) => c = add(c, col().gap(6.0).child(section(t, "Dictionary", None)).child(status(t, &format!("Couldn't reach the dictionary ({e})"))), false),
-        Part::Missing => {}
+    let sections: Vec<&Section> = v.sections.iter().filter(|s| !hidden(t, s)).collect();
+    let mut any = false;
+    for s in &sections {
+        let block = match (s.part.found(), s.kind) {
+            (Some(Entry::Definition(d)), Kind::Thesaurus) => thesaurus(t, &s.title, d),
+            (Some(Entry::Definition(d)), _) => Some(dictionary(t, &s.title, d, live)),
+            (Some(Entry::Wiki(w)), _) => Some(wikipedia(t, &s.title, w, v.thumbnail.as_ref(), live)),
+            (None, _) => None,
+        };
+        if let Some(b) = block { c = add(c, b, any); any = true; }
     }
-    let wiki = if t.hide_wikipedia { &Part::Missing } else { &v.wiki };
-    match wiki {
-        Part::Found(w) => { let sep = any || definition.settled(); c = add(c, wikipedia(t, w, v.thumbnail.as_ref()), sep); any = true; }
-        Part::Failed(e) if !any => c = add(c, status(t, &format!("Couldn't reach Wikipedia ({e})")), false),
-        Part::Loading if t.hide_dictionary => c = add(c, col().gap(8.0).child(txt(&t.headword, &v.query, p.family)).child(status(t, "Looking up…")), false),
-        _ => {}
+    let with_footer = |c: El| if t.footer.hidden { c } else { add(c, footer(t, live), true) };
+    if any { return with_footer(c); }
+    let word = || txt(&t.headword, &v.query, p.family);
+    if sections.is_empty() {
+        c = add(c, col().w_full().gap(6.0).child(word()).child(status(t, "No dictionaries are turned on. Choose some in tlum's settings.")), false);
+    } else if !sections.iter().all(|s| s.part.settled()) {
+        c = add(c, col().w_full().gap(8.0).child(word()).child(status(t, "Looking up…")), false);
+    } else {
+        let mut block = col().w_full().gap(6.0).child(word());
+        let failed: Vec<(&str, &str)> = sections.iter().filter_map(|s| if let Part::Failed(e) = &s.part { Some((s.title.as_str(), e.as_str())) } else { None }).collect();
+        if failed.is_empty() { block = block.child(status(t, "No entries found")); }
+        for (title, e) in failed { block = block.child(status(t, &format!("Couldn't reach {title} ({e})"))); }
+        c = add(c, block, false);
     }
-    if !any && definition.settled() && wiki.settled() && !matches!(definition, Part::Failed(_)) {
-        c = add(c, col().w_full().gap(6.0).child(txt(&t.headword, &v.query, p.family)).child(status(t, "No entries found")), false);
-    }
-    c
+    with_footer(c)
 }
 
 /// A popover arrow pointing up (or down), its base overlapping the panel's border so the
@@ -356,6 +406,35 @@ fn arrow(t: &Theme, up: bool) -> El {
         shape = shape.stroke(vec![[0.0, base], [w / 2.0, tip], [w, base]], t.popover.border_width, t.popover.border.color());
     }
     canvas(shape).size(w, h)
+}
+
+/// The popover, arrow included, hanging `below` the word or above it, its arrow `arrow_x` in.
+/// `live` (the overlay's scroll position, which it reports) wires its handlers; without it,
+/// it's a picture, as the settings' preview draws it.
+pub fn popover(t: &Theme, v: &Shown, below: bool, arrow_x: f32, room: f32, live: Option<Arc<Mutex<Option<ScrollPos>>>>) -> El {
+    let (w, arrow_h) = (t.popover.width, if t.arrow.hidden { 0.0 } else { t.arrow.height });
+    let mut body = col().key("lu-body").w_full().max_h(room).scroll(ScrollSpec { stick_bottom: false }).scroll_edge_fade(12.0)
+        .child(content(t, v, live.is_some()));
+    if let Some(scroll) = live.clone() { body = body.on_scroll_offset(move |pos| *scroll.lock().unwrap() = Some(pos)); }
+    let mut panel = col().key("lu-panel").w(w).radius(t.popover.radius).fill(t.popover.background.color()).clip_rounded(t.popover.radius).child(body);
+    if live.is_some() { panel = panel.on_press(|_: &mut Popover| {}); }
+    if t.popover.border_width > 0.0 { panel = panel.border(t.popover.border_width, t.popover.border.color()); }
+    if let Some(sh) = t.popover.shadow { panel = panel.box_shadow(sh.rune()); }
+    // Grows from the arrow's tip; closing shrinks back a little as it fades.
+    let origin_x = (arrow_x + t.arrow.width / 2.0) / w;
+    let mut pop_el = col().key(format!("lu-pop-{}", v.generation)).w(w).origin(origin_x, if below { 0.0 } else { 1.0 })
+        .transition(presence(t.popover.animate, t.popover.scale_from, t.popover.duration, 0.18));
+    // The popover is the overlay's one hit region, and where `hover` holds: a click or wheel on
+    // it is its own and doesn't close it.
+    if live.is_some() {
+        pop_el = pop_el.hit().on_hover_change(|s: &mut Popover, on, _| s.hover = on).on_wheel(|_: &mut Popover, _, _| true);
+    }
+    pop_el = if below { pop_el.pt(arrow_h) } else { pop_el.pb(arrow_h) };
+    pop_el = pop_el.child(panel);
+    if !t.arrow.hidden {
+        pop_el = pop_el.child(arrow(t, below).pin(Some(arrow_x), if below { Some(0.0) } else { None }, None, if below { None } else { Some(0.0) }));
+    }
+    pop_el
 }
 
 /// An entrance that scales from `from` and fades, on a spring of `duration` seconds; its exit
@@ -381,7 +460,7 @@ pub fn view(s: &Popover, cx: &mut Cx<Popover>) -> El {
         None => root,
     };
     let Some(v) = &s.shown else { return root };
-    let dark = s.force_dark.unwrap_or_else(|| cx.system_dark());
+    let dark = s.force_dark.or_else(|| crate::config::current().appearance.forced_dark()).unwrap_or_else(|| cx.system_dark());
     let t = crate::style::theme(dark);
     let off = offset(s, v);
     let surface = s.size.unwrap_or([v.screen[0] - off[0], v.screen[1] - off[1]]);
@@ -394,30 +473,7 @@ pub fn view(s: &Popover, cx: &mut Cx<Popover>) -> El {
     });
     let (left, below, arrow_x, room) = place([word[0] - fit[0], word[1] - fit[1], word[2], word[3]], [fit[2], fit[3]], &t);
     let left = left + fit[0];
-    let (w, arrow_h) = (t.popover.width, if t.arrow.hidden { 0.0 } else { t.arrow.height });
-
-    let scroll = s.scroll.clone();
-    let body = col().key("lu-body").w_full().max_h(room).scroll(ScrollSpec { stick_bottom: false }).scroll_edge_fade(12.0)
-        .on_scroll_offset(move |pos| *scroll.lock().unwrap() = Some(pos))
-        .child(content(&t, v));
-    let mut panel = col().key("lu-panel").w(w).radius(t.popover.radius).fill(t.popover.background.color()).clip_rounded(t.popover.radius)
-        .on_press(|_: &mut Popover| {})
-        .child(body);
-    if t.popover.border_width > 0.0 { panel = panel.border(t.popover.border_width, t.popover.border.color()); }
-    if let Some(sh) = t.popover.shadow { panel = panel.box_shadow(sh.rune()); }
-    // Grows from the arrow's tip; closing shrinks back a little as it fades.
-    let origin_x = (arrow_x + t.arrow.width / 2.0) / w;
-    // The popover, arrow included, is the overlay's one hit region, and where `hover` holds:
-    // a click or wheel on it is its own and doesn't close it.
-    let mut pop_el = col().key(format!("lu-pop-{}", v.generation)).w(w).origin(origin_x, if below { 0.0 } else { 1.0 })
-        .hit().on_hover_change(|s: &mut Popover, on, _| s.hover = on)
-        .on_wheel(|_: &mut Popover, _, _| true)
-        .transition(presence(t.popover.animate, t.popover.scale_from, t.popover.duration, 0.18));
-    pop_el = if below { pop_el.pt(arrow_h) } else { pop_el.pb(arrow_h) };
-    pop_el = pop_el.child(panel);
-    if !t.arrow.hidden {
-        pop_el = pop_el.child(arrow(&t, below).pin(Some(arrow_x), if below { Some(0.0) } else { None }, None, if below { None } else { Some(0.0) }));
-    }
+    let mut pop_el = popover(&t, v, below, arrow_x, room, Some(s.scroll.clone()));
     pop_el = if below {
         pop_el.pin(Some(left), Some(word[1] + word[3] + 2.0), None, None)
     } else {

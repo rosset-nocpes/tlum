@@ -70,10 +70,12 @@ pub struct Settings {
     pub natural_scroll: bool,
 }
 
+impl Settings {
+    pub const DEFAULT: Settings = Settings { hold_ms: 600, three_finger_tap: true, force_click: true, mouse_hold: true, mouse_button: None, natural_scroll: false };
+}
+
 impl Default for Settings {
-    fn default() -> Self {
-        Settings { hold_ms: 600, three_finger_tap: true, force_click: true, mouse_hold: true, mouse_button: None, natural_scroll: false }
-    }
+    fn default() -> Self { Settings::DEFAULT }
 }
 
 /// A press waiting to become a force click.

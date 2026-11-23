@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use crate::config::Config;
 
 const DESKTOP_ID: &str = "dev.tlum.Tlum.desktop";
+/// The settings window's launcher entry.
+const SETTINGS_ID: &str = "dev.tlum.Tlum.Settings.desktop";
 
 fn home() -> PathBuf { PathBuf::from(std::env::var_os("HOME").unwrap_or_default()) }
 fn data_home() -> PathBuf { std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".local/share")) }
@@ -27,6 +29,36 @@ X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2
         autostart, if autostart { "X-KDE-autostart-phase=2\n" } else { "" })
 }
 
+/// The launcher entry for `tlum settings`. It carries the screenshot grant too: KWin may match
+/// either entry to the executable.
+fn settings_entry(exec: &str) -> String {
+    format!("[Desktop Entry]
+Type=Application
+Name=tlum Settings
+GenericName=Dictionary popover settings
+Comment=Choose dictionaries, triggers and the popover's look
+Exec={exec} settings
+Icon=accessories-dictionary
+Terminal=false
+Categories=Settings;Utility;Dictionary;
+Keywords=dictionary;look up;define;thesaurus;wikipedia;
+StartupWMClass=dev.tlum.Settings
+X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2
+")
+}
+
+fn autostart_path() -> PathBuf { config_home().join("autostart").join(DESKTOP_ID) }
+
+/// Whether tlum starts at login.
+pub fn autostart_enabled() -> bool { autostart_path().exists() }
+
+/// Starts tlum at login, or stops doing so.
+pub fn set_autostart(on: bool) -> Result<(), String> {
+    if !on { return std::fs::remove_file(autostart_path()).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e.to_string()) }); }
+    let exe = if bin_path().exists() { bin_path() } else { std::env::current_exe().map_err(|e| e.to_string())? };
+    write(&autostart_path(), &desktop_entry(&exe.to_string_lossy(), true))
+}
+
 fn write(path: &PathBuf, contents: &str) -> Result<(), String> {
     if let Some(dir) = path.parent() { std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?; }
     std::fs::write(path, contents).map_err(|e| format!("{}: {e}", path.display()))
@@ -47,6 +79,8 @@ pub fn install() -> Result<(), String> {
     let autostart = config_home().join("autostart").join(DESKTOP_ID);
     write(&app, &desktop_entry(&exec, false))?;
     write(&autostart, &desktop_entry(&exec, true))?;
+    let settings = data_home().join("applications").join(SETTINGS_ID);
+    write(&settings, &settings_entry(&exec))?;
     // KWin checks the screenshot grant through KService's cache of desktop files.
     for tool in ["kbuildsycoca6", "kbuildsycoca5"] {
         if std::process::Command::new(tool).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok() { break; }
@@ -61,18 +95,19 @@ pub fn install() -> Result<(), String> {
     println!("Installed {exec}");
     println!("  {}  (grants KWin screenshots to this executable)", app.display());
     println!("  {}  (starts at login)", autostart.display());
+    println!("  {}  (tlum Settings in your app launcher)", settings.display());
     if !in_input_group() {
         println!("\nTo use touchpad and mouse gestures, let tlum read input devices:\n  sudo usermod -aG input $USER   (then log out and back in)");
     }
     if kind == crate::desktop::Kind::Wayland && !desktop_name().contains("gnome") {
         println!("\nKeyboard shortcut and start at login: {}", shortcut_hint());
     }
-    println!("\nStart it now with:  tlum &   — or log out and back in.");
+    println!("\nStart it now with:  tlum &   — or log out and back in. `tlum settings` sets it up.");
     Ok(())
 }
 
 pub fn uninstall() -> Result<(), String> {
-    for p in [data_home().join("applications").join(DESKTOP_ID), config_home().join("autostart").join(DESKTOP_ID), bin_path()] {
+    for p in [data_home().join("applications").join(DESKTOP_ID), data_home().join("applications").join(SETTINGS_ID), autostart_path(), bin_path()] {
         if std::fs::remove_file(&p).is_ok() { println!("removed {}", p.display()); }
     }
     let _ = std::process::Command::new("kbuildsycoca6").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();

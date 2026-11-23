@@ -23,4 +23,8 @@ impl Service {
     /// Look up `text`, shown at the pointer.
     fn look_up(&self, text: String) { self.engine.send(Job::Text(text)); }
     fn close(&self) { crate::engine::close_all(); }
+    /// Stop tlum (the settings' Stop and Restart).
+    fn quit(&self) {
+        std::thread::spawn(|| { std::thread::sleep(std::time::Duration::from_millis(50)); std::process::exit(0) });
+    }
 }

@@ -37,6 +37,9 @@ pub struct Definition {
     /// "Inflection of …" when the word was found under another form.
     pub note: Option<String>,
     pub url: String,
+    /// The dictionary that answered, when it isn't the section's own: an offline one standing
+    /// in for the online dictionary. The section's header names it in place of its link.
+    pub source: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -140,7 +143,7 @@ fn from_free_dictionary(entries: Vec<FdEntry>) -> Option<Definition> {
         }
     }
     meanings.retain(|m| !m.senses.is_empty());
-    (!meanings.is_empty()).then_some(Definition { headword, phonetic, meanings, note: None, url })
+    (!meanings.is_empty()).then_some(Definition { headword, phonetic, meanings, note: None, url, source: None })
 }
 
 // --- Wiktionary REST ------------------------------------------------------------------------
@@ -173,7 +176,7 @@ fn from_wiktionary(word: &str, lang: &str, mut by_lang: HashMap<String, Vec<WtUs
         ..Meaning::default()
     }).filter(|m| !m.senses.is_empty()).collect();
     (!meanings.is_empty()).then(|| Definition {
-        headword: word.to_string(), phonetic: None, meanings, note: None,
+        headword: word.to_string(), phonetic: None, meanings, note: None, source: None,
         url: format!("https://{lang}.wiktionary.org/wiki/{}", enc(word)),
     })
 }
@@ -289,20 +292,145 @@ pub fn wikipedia(query: &str, lang: &str) -> Part<Wiki> {
     }
 }
 
-/// Recent lookups, so looking the same word up again is instant.
+// --- sections ---------------------------------------------------------------------------------
+
+/// What a section shows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Entry { Definition(Definition), Wiki(Wiki) }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind { Dictionary, Thesaurus, Wikipedia }
+
+/// One source's part of the popover, in the order the settings give.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Section {
+    pub id: String,
+    pub title: String,
+    pub kind: Kind,
+    pub part: Part<Entry>,
+}
+
+impl Section {
+    pub fn wiki(&self) -> Option<&Wiki> { match self.part.found() { Some(Entry::Wiki(w)) => Some(w), _ => None } }
+    /// The page the section links to.
+    pub fn url(&self) -> Option<&str> {
+        match self.part.found()? {
+            Entry::Definition(d) => (!d.url.is_empty()).then_some(d.url.as_str()),
+            Entry::Wiki(w) => Some(&w.url),
+        }
+    }
+}
+
+/// Empty sections for these sources, each loading.
+pub fn sections(ids: &[String]) -> Vec<Section> {
+    let installed = crate::library::installed();
+    ids.iter().filter_map(|id| {
+        let (title, kind) = match id.as_str() {
+            "dictionary" => ("Dictionary".to_string(), Kind::Dictionary),
+            "thesaurus" => ("Thesaurus".to_string(), Kind::Thesaurus),
+            "wikipedia" => ("Wikipedia".to_string(), Kind::Wikipedia),
+            other => (installed.iter().find(|d| d.id == other)?.name.clone(), Kind::Dictionary),
+        };
+        Some(Section { id: id.clone(), title, kind, part: Part::Loading })
+    }).collect()
+}
+
+/// One lookup's sources, fetched in parallel. The online dictionary is fetched once, for the
+/// dictionary and the thesaurus both.
+pub struct Lookup {
+    pub query: String,
+    pub language: String,
+    pub offline: bool,
+    /// The sources this lookup shows: an offline dictionary with a section of its own doesn't
+    /// stand in for the online one too.
+    shown: Vec<String>,
+    online: Mutex<Option<Part<Definition>>>,
+}
+
+impl Lookup {
+    pub fn new(query: &str, language: &str, offline: bool, shown: &[String]) -> Lookup {
+        Lookup { query: query.to_string(), language: language.to_string(), offline, shown: shown.to_vec(), online: Mutex::new(None) }
+    }
+
+    /// The online dictionary's stand-in: the first installed dictionary of the lookup
+    /// language that has the word (WordNet first, for English), among those not shown anyway.
+    fn offline_definition(&self) -> Option<Definition> {
+        let lang = crate::library::iso3(&self.language);
+        let mut candidates: Vec<crate::library::Installed> = crate::library::installed().into_iter()
+            .filter(|d| !self.shown.contains(&d.id) && d.language.as_deref() == Some(lang))
+            .collect();
+        candidates.sort_by_key(|d| d.id != "wordnet");
+        candidates.into_iter().find_map(|d| match crate::library::define(&d.id, &self.query, lang == "eng") {
+            Part::Found(mut def) => { def.source = Some(d.name); Some(def) }
+            _ => None,
+        })
+    }
+
+    fn online(&self) -> Part<Definition> {
+        let mut o = self.online.lock().unwrap();
+        o.get_or_insert_with(|| define(&self.query, &self.language)).clone()
+    }
+
+    /// What source `id` has for the query.
+    pub fn fetch(&self, id: &str) -> Part<Entry> {
+        let english = |lang: Option<&str>| lang.map_or(self.query.is_ascii(), |l| l == "eng");
+        match id {
+            // Online, and an installed dictionary when the network fails, the word isn't there,
+            // or tlum is offline.
+            "dictionary" => {
+                let online = if self.offline { Part::Missing } else { self.online() };
+                match online {
+                    Part::Found(d) => Part::Found(Entry::Definition(d)),
+                    other => match self.offline_definition() {
+                        Some(d) => Part::Found(Entry::Definition(d)),
+                        None => to_entry(other),
+                    },
+                }
+            }
+            "wikipedia" if self.offline => Part::Missing,
+            "wikipedia" => match wikipedia(&self.query, &self.language) {
+                Part::Found(w) => Part::Found(Entry::Wiki(w)),
+                Part::Loading => Part::Loading,
+                Part::Missing => Part::Missing,
+                Part::Failed(e) => Part::Failed(e),
+            },
+            // Synonyms from the online dictionary, else from WordNet when it's installed.
+            "thesaurus" => {
+                let has = |d: &Definition| d.meanings.iter().any(|m| !m.synonyms.is_empty() || !m.antonyms.is_empty());
+                let online = if self.offline || self.language != "en" { Part::Missing } else { self.online() };
+                if let Part::Found(d) = &online && has(d) { return Part::Found(Entry::Definition(d.clone())); }
+                if crate::library::is_installed("wordnet") && english(Some("eng")) && let Part::Found(d) = crate::library::define("wordnet", &self.query, true) && has(&d) {
+                    return Part::Found(Entry::Definition(d));
+                }
+                match online { Part::Failed(e) => Part::Failed(e), _ => Part::Missing }
+            }
+            other => {
+                let lang = crate::library::installed().into_iter().find(|d| d.id == other).and_then(|d| d.language);
+                to_entry(crate::library::define(other, &self.query, english(lang.as_deref())))
+            }
+        }
+    }
+}
+
+fn to_entry(p: Part<Definition>) -> Part<Entry> {
+    match p { Part::Found(d) => Part::Found(Entry::Definition(d)), Part::Loading => Part::Loading, Part::Missing => Part::Missing, Part::Failed(e) => Part::Failed(e) }
+}
+
+/// Recent lookups, so looking the same word up again is instant. Keyed by the query and the
+/// sources asked, so changing the settings asks again.
 #[derive(Clone, Default)]
-pub struct Cache(Arc<Mutex<Vec<(String, Part<Definition>, Part<Wiki>)>>>);
+pub struct Cache(Arc<Mutex<Vec<(String, Vec<Section>)>>>);
 
 impl Cache {
-    pub fn get(&self, q: &str) -> Option<(Part<Definition>, Part<Wiki>)> {
-        self.0.lock().unwrap().iter().find(|e| e.0 == q).map(|e| (e.1.clone(), e.2.clone()))
+    pub fn get(&self, key: &str) -> Option<Vec<Section>> {
+        self.0.lock().unwrap().iter().find(|e| e.0 == key).map(|e| e.1.clone())
     }
-    pub fn put(&self, q: &str, d: Part<Definition>, w: Part<Wiki>) {
-        // Failures (offline) aren't worth keeping.
-        if matches!(d, Part::Failed(_)) || matches!(w, Part::Failed(_)) { return; }
+    pub fn put(&self, key: &str, sections: &[Section]) {
+        // Failures (offline) aren't worth keeping, nor lookups still under way.
+        if sections.iter().any(|s| matches!(s.part, Part::Failed(_) | Part::Loading)) { return; }
         let mut v = self.0.lock().unwrap();
-        v.retain(|e| e.0 != q);
-        v.push((q.to_string(), d, w));
+        v.retain(|e| e.0 != key);
+        v.push((key.to_string(), sections.to_vec()));
         if v.len() > 64 { v.remove(0); }
     }
 }

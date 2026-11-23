@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use zbus::blocking::Connection;
 
 use crate::config::Config;
-use crate::dict::{self, Cache, Part};
+use crate::dict::{self, Cache, Entry};
 use crate::desktop::{self, Desktop};
 use crate::kwin::Pointer;
 use crate::ocr::Ocr;
@@ -60,7 +60,8 @@ pub fn start(config: Config, kind: desktop::Kind, screens: Vec<Screen>, pointer_
 
 struct Ctx {
     engine: Engine,
-    config: Config,
+    /// The settings as of the job under way (`config::current`).
+    config: Arc<Config>,
     screens: Vec<Screen>,
     desktop: Result<Box<dyn Desktop>, String>,
     ocr: Option<Result<Ocr, String>>,
@@ -74,15 +75,24 @@ fn worker(engine: Engine, config: Config, kind: desktop::Kind, screens: Vec<Scre
         Ok(d) => eprintln!("tlum: desktop backend: {}", d.name()),
         Err(e) => eprintln!("tlum: no desktop backend: {e}"),
     }
-    let mut cx = Ctx { engine, config, screens, desktop, ocr: None, cache: Cache::default() };
-    // Load Tesseract now, not on the first lookup.
-    cx.ocr = Some(Ocr::new(&cx.config.ocr_language));
+    let mut cx = Ctx { engine, config: Arc::new(config), screens, desktop, ocr: None, cache: Cache::default() };
+    // Load Tesseract now, not on the first lookup, and open the installed dictionaries.
+    let mut ocr_language = cx.config.ocr_language.clone();
+    cx.ocr = Some(Ocr::new(&ocr_language));
     if let Some(Err(e)) = &cx.ocr { eprintln!("tlum: OCR unavailable: {e}"); }
+    let local: Vec<String> = cx.config.active_sources().into_iter().filter(|id| !matches!(id.as_str(), "dictionary" | "thesaurus" | "wikipedia")).collect();
+    std::thread::spawn(move || crate::library::warm(&local));
     while let Ok(job) = jobs.recv() {
         // Only the newest trigger matters.
         let mut job = job;
         while let Ok(next) = jobs.try_recv() { job = next; }
         let started = Instant::now();
+        cx.config = crate::config::current();
+        if cx.config.ocr_language != ocr_language {
+            ocr_language = cx.config.ocr_language.clone();
+            cx.ocr = Some(Ocr::new(&ocr_language));
+            if let Some(Err(e)) = &cx.ocr { eprintln!("tlum: OCR unavailable: {e}"); }
+        }
         let result = match job {
             Job::Trigger(at, why) => trigger(&mut cx, at).map(|q| format!("{why}: {q}")),
             Job::Text(t) => text(&mut cx, t.clone()).map(|_| format!("text: {t}")),
@@ -205,11 +215,13 @@ fn show(cx: &mut Ctx, display: usize, p: &Pointer, query: String, rect: [f64; 4]
         }
         None => (local(rect), None),
     };
-    let cached = cx.cache.get(&query);
-    let (definition, wiki) = cached.clone().unwrap_or((Part::Loading, Part::Loading));
+    let sources = cx.config.active_sources();
+    let key = format!("{}|{}|{}\n{query}", sources.join(","), cx.config.language, cx.config.offline);
+    let cached = cx.cache.get(&key);
+    let sections = cached.clone().unwrap_or_else(|| dict::sections(&sources));
     let shown = Shown {
         generation, query: query.clone(), word, marker: pixels, screen: [screen[2] as f32, screen[3] as f32],
-        offset: None, area: p.area.map(local), pointer, shown_at: Instant::now(), definition, wiki, thumbnail: None,
+        offset: None, area: p.area.map(local), pointer, shown_at: Instant::now(), sections: sections.clone(), thumbnail: None,
     };
     overlay.update(move |s: &mut Popover, _| { s.hover = false; s.shown = Some(shown); });
     // Only the popover takes the pointer, unless the overlay hides a live screen behind a picture.
@@ -225,34 +237,28 @@ fn show(cx: &mut Ctx, display: usize, p: &Pointer, query: String, rect: [f64; 4]
     }
     *ui::VISIBLE.lock().unwrap() = Some((generation, display));
 
-    if let Some((_, Part::Found(w))) = &cached { fetch_thumbnail(&overlay, generation, w.thumbnail.clone()); }
-    if cached.is_some() { return; }
-    let lang = cx.config.language.clone();
-    let results: Arc<Mutex<(Option<Part<dict::Definition>>, Option<Part<dict::Wiki>>)>> = Arc::default();
-    let finish = {
-        let (cache, query, results) = (cx.cache.clone(), query.clone(), results.clone());
-        move || {
-            let r = results.lock().unwrap();
-            if let (Some(d), Some(w)) = (&r.0, &r.1) { cache.put(&query, d.clone(), w.clone()); }
-        }
-    };
-    {
-        let (overlay, q, lang, results, finish) = (overlay.clone(), query.clone(), lang.clone(), results.clone(), finish.clone());
+    let pictures = cx.config.appearance.pictures != Some(false);
+    let thumbnail = |sections: &[dict::Section]| sections.iter().find_map(|s| s.wiki()).and_then(|w| w.thumbnail.clone()).filter(|_| pictures);
+    if cached.is_some() { return fetch_thumbnail(&overlay, generation, thumbnail(&sections)); }
+    // Each source in parallel; each section fills in as it arrives.
+    let lookup = Arc::new(dict::Lookup::new(&query, &cx.config.language, cx.config.offline, &sources));
+    let results = Arc::new(Mutex::new(sections));
+    for (i, id) in sources.into_iter().enumerate() {
+        let (overlay, lookup, results, cache, key) = (overlay.clone(), lookup.clone(), results.clone(), cx.cache.clone(), key.clone());
         std::thread::spawn(move || {
-            let d = dict::define(&q, &lang);
-            results.lock().unwrap().0 = Some(d.clone());
-            finish();
-            overlay.update(move |s: &mut Popover, _| if let Some(v) = s.shown.as_mut().filter(|v| v.generation == generation) { v.definition = d; });
+            let part = lookup.fetch(&id);
+            let thumb = match part.found() { Some(Entry::Wiki(w)) if pictures => w.thumbnail.clone(), _ => None };
+            {
+                let mut r = results.lock().unwrap();
+                if let Some(s) = r.get_mut(i) { s.part = part.clone(); }
+                cache.put(&key, &r);
+            }
+            overlay.update(move |s: &mut Popover, _| {
+                if let Some(sec) = s.shown.as_mut().filter(|v| v.generation == generation).and_then(|v| v.sections.get_mut(i)) { sec.part = part; }
+            });
+            fetch_thumbnail(&overlay, generation, thumb);
         });
     }
-    std::thread::spawn(move || {
-        let w = dict::wikipedia(&query, &lang);
-        results.lock().unwrap().1 = Some(w.clone());
-        finish();
-        let thumb = w.found().and_then(|w| w.thumbnail.clone());
-        overlay.update(move |s: &mut Popover, _| if let Some(v) = s.shown.as_mut().filter(|v| v.generation == generation) { v.wiki = w; });
-        fetch_thumbnail(&overlay, generation, thumb);
-    });
 }
 
 fn fetch_thumbnail(overlay: &rune::OverlayHandle<Popover>, generation: u64, url: Option<String>) {

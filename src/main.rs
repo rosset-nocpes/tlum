@@ -12,19 +12,24 @@ mod dict;
 mod engine;
 mod gesture;
 mod hypr;
+mod icons;
 mod image;
 mod input;
 mod install;
 mod kwin;
+mod library;
 mod ocr;
 mod portal;
 mod preview;
 mod scan;
 mod selection;
 mod service;
+mod settings;
+mod stardict;
 mod style;
 mod ui;
 mod wl;
+mod wordnet;
 mod x11;
 
 use std::sync::Mutex;
@@ -44,6 +49,10 @@ USAGE:
     tlum trigger        look up the word under the pointer (bind it to a key anywhere)
     tlum define WORD…   show the popover for WORD at the pointer
     tlum close          close the popover
+    tlum quit           stop the daemon
+    tlum settings [PAGE]   open the settings (general, dictionaries, appearance, advanced)
+    tlum lookup WORD…   print what the popover would show for WORD
+    tlum dictionaries   list installed dictionaries (`available`, `install ID`, `remove ID`)
     tlum install        install to ~/.local/bin, grant KWin screenshots, start at login
     tlum uninstall      undo install
     tlum doctor         check what works on this desktop
@@ -80,6 +89,10 @@ fn main() {
         Some("trigger") => call("Trigger", None),
         Some("define") if args.len() > 1 => call("LookUp", Some(args[1..].join(" "))),
         Some("close") => call("Close", None),
+        Some("quit") => call("Quit", None),
+        Some("settings") => { settings::run(args[1..].to_vec()); Ok(()) }
+        Some("lookup") if args.len() > 1 => { lookup(&args[1..].join(" ")); Ok(()) }
+        Some("dictionaries") => dictionaries_command(&args[1..]),
         Some("install") => install::install(),
         Some("uninstall") => install::uninstall(),
         Some("doctor") => { install::doctor(); Ok(()) }
@@ -163,10 +176,62 @@ fn style_command(arg: Option<&str>) -> Result<(), String> {
     }
 }
 
+/// Each source's answer, as text.
+fn lookup(word: &str) {
+    let c = Config::load();
+    let ids = c.active_sources();
+    let l = dict::Lookup::new(word, &c.language, c.offline, &ids);
+    for mut s in dict::sections(&ids) {
+        s.part = l.fetch(&s.id);
+        println!("== {}", s.title);
+        match &s.part {
+            dict::Part::Found(dict::Entry::Definition(d)) => {
+                if let Some(src) = &d.source { println!("(from {src})"); }
+                println!("{}{}{}", d.headword, d.phonetic.as_ref().map(|p| format!("  {p}")).unwrap_or_default(), d.note.as_ref().map(|n| format!("  ({n})")).unwrap_or_default());
+                for m in &d.meanings {
+                    if s.kind == dict::Kind::Thesaurus {
+                        println!("  {}: {}", m.part_of_speech, m.synonyms.join(", "));
+                        continue;
+                    }
+                    if !m.part_of_speech.is_empty() { println!("  {}", m.part_of_speech); }
+                    for (i, x) in m.senses.iter().enumerate().take(6) { println!("   {}. {}", i + 1, x.text); }
+                }
+            }
+            dict::Part::Found(dict::Entry::Wiki(w)) => println!("{}: {}", w.title, w.extract),
+            other => println!("{other:?}"),
+        }
+    }
+}
+
+fn dictionaries_command(args: &[String]) -> Result<(), String> {
+    match args.first().map(String::as_str) {
+        None => {
+            let all = library::installed();
+            if all.is_empty() { println!("No dictionaries installed (`tlum dictionaries available`, or `tlum settings`)."); }
+            for d in all { println!("{:28} {}  ({}, {})", d.id, d.name, d.detail, library::human_size(d.size)); }
+            Ok(())
+        }
+        Some("available") => {
+            for o in library::catalog(false)? { println!("{:28} {:40} {}", o.id, o.name, library::human_size(o.size)); }
+            Ok(())
+        }
+        Some("install") if args.len() == 2 => {
+            let offer = library::catalog(false)?.into_iter().find(|o| o.id == args[1]).ok_or_else(|| format!("no dictionary {} (see `tlum dictionaries available`)", args[1]))?;
+            library::install(&offer, &|got, total| eprint!("\r{} of {}   ", library::human_size(got), library::human_size(total)), &|| false)?;
+            eprintln!();
+            println!("Installed {}", offer.name);
+            Ok(())
+        }
+        Some("add") if args.len() == 2 => library::add_local(std::path::Path::new(&args[1])).map(|id| println!("Added {id}")),
+        Some("remove") if args.len() == 2 => library::remove(&args[1]),
+        _ => Err("usage: tlum dictionaries [available | install ID | add PATH | remove ID]".into()),
+    }
+}
+
 fn setup_images(s: &mut Popover, waker: rune::Waker) { s.images = Some(rune::ImageCache::new(waker)); }
 
 fn daemon() {
-    let config = Config::load();
+    let config = (*config::reload()).clone();
     let conn = match zbus::blocking::Connection::session() {
         Ok(c) => c,
         Err(e) => { eprintln!("tlum: no D-Bus session bus: {e}"); std::process::exit(1) }
@@ -221,14 +286,40 @@ fn daemon() {
         register_shortcut(kind, &conn, &config.shortcut, &engine, scale);
         // The popover's CSS: report mistakes now, and restyle whenever it's saved.
         for w in style::reload() { eprintln!("tlum: {w}"); }
-        style::watch(|| if let Some(all) = ui::OVERLAYS.get() { for o in all { o.update(|_, _| {}); } });
-        let gestures = config.gestures();
+        let restyle = || if let Some(all) = ui::OVERLAYS.get() { for o in all { o.update(|_, _| {}); } };
+        style::watch(restyle);
+        // The settings: most apply at once; the backend and the shortcut need a fresh start.
+        *GESTURES.write().unwrap() = config.gestures();
+        let started = config.clone();
+        config::watch_file(config::config_path(), move || {
+            let now = config::reload();
+            if now.backend != started.backend || now.shortcut != started.shortcut {
+                eprintln!("tlum: the backend or shortcut changed; restarting");
+                restart();
+            }
+            *GESTURES.write().unwrap() = now.gestures();
+            for w in style::reload() { eprintln!("tlum: {w}"); }
+            restyle();
+            eprintln!("tlum: settings reloaded");
+        });
         let e = engine.clone();
-        std::thread::Builder::new().name("input".into()).spawn(move || input::run(gestures, move |fx, dev| on_gesture(&e, fx, dev, evdev_scroll))).unwrap();
+        std::thread::Builder::new().name("input".into()).spawn(move || input::run(|| GESTURES.read().unwrap().clone(), move |fx, dev| on_gesture(&e, fx, dev, evdev_scroll))).unwrap();
         // Keep the connection (and with it the service and its name) for the life of the app.
         std::mem::forget(conn);
         vec![WindowSpec::from_app("tlum", app)]
     });
+}
+
+/// The gesture settings in effect, for the input thread.
+static GESTURES: std::sync::RwLock<gesture::Settings> = std::sync::RwLock::new(gesture::Settings::DEFAULT);
+
+/// Starts over as a new process in this one's place, with the same arguments. The session bus
+/// connection closes with the old image, which frees the name for the new one.
+fn restart() {
+    use std::os::unix::process::CommandExt;
+    let Ok(exe) = std::env::current_exe() else { return };
+    let e = std::process::Command::new(exe).args(std::env::args_os().skip(1)).exec();
+    eprintln!("tlum: couldn't restart: {e}");
 }
 
 /// KWin and X11 take a global shortcut from us; other desktops bind `tlum trigger`.

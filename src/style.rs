@@ -13,7 +13,17 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use rune::{Color, Family, TextCase, TextStyle};
 
+use crate::config::Appearance;
+
 pub const DEFAULT_CSS: &str = include_str!("../assets/default.css");
+
+/// The built-in themes: id, name, and the sheet that cascades over the default one.
+pub const THEMES: [(&str, &str, &str); 4] = [
+    ("default", "Default", ""),
+    ("paper", "Paper", include_str!("../assets/themes/paper.css")),
+    ("nord", "Nord", include_str!("../assets/themes/nord.css")),
+    ("minimal", "Minimal", include_str!("../assets/themes/minimal.css")),
+];
 
 /// A colour as written: sRGB bytes with straight alpha.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -129,6 +139,8 @@ pub struct Theme {
     pub wiki_description: Text,
     pub wiki_extract: Text,
     pub status: Text,
+    /// "Settings…" at the end of the popover.
+    pub footer: Text,
     pub hide_dictionary: bool,
     pub hide_thesaurus: bool,
     pub hide_wikipedia: bool,
@@ -457,6 +469,7 @@ fn apply(t: &mut Theme, selector: &str, prop: &str, v: &str) -> Result<(), Strin
                 ".sense" => &mut t.sense, ".sense-number" => &mut t.sense_number, ".example" => &mut t.example,
                 ".synonyms" => &mut t.synonyms, ".synonyms-label" => &mut t.synonyms_label, ".wiki-title" => &mut t.wiki_title,
                 ".wiki-description" => &mut t.wiki_description, ".wiki-extract" => &mut t.wiki_extract, ".status" => &mut t.status,
+                ".footer" => &mut t.footer,
                 s => return Err(format!("unknown selector {s:?} (see `tlum style --default` for the parts)")),
             };
             match (selector, prop) {
@@ -514,17 +527,72 @@ pub fn user_path() -> std::path::PathBuf {
         .unwrap_or_else(|| crate::config::config_path().with_file_name("style.css"))
 }
 
-/// The light and dark themes, from the defaults and the user's sheet.
+/// The light and dark themes, from the defaults, the settings and the user's sheet.
 pub fn build(user: Option<&str>) -> (Theme, Theme, Vec<String>) {
+    build_with(&crate::config::current().appearance, user)
+}
+
+/// The rules the settings add over their theme.
+pub fn appearance_css(a: &Appearance) -> String {
+    let mut c = String::new();
+    let valid = |v: &Option<String>| v.as_deref().filter(|v| color(v).is_ok()).map(str::to_string);
+    if let Some(x) = valid(&a.accent) { c += &format!(".link, .section-title, .sense-number {{ color: {x} }}\n"); }
+    if let Some(x) = valid(&a.highlight) {
+        // Letters that read on it: dark on a light marker, light on a dark one.
+        let [r, g, b, _] = color(&x).unwrap().0;
+        let light = 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32 > 140.0;
+        c += &format!(".marker {{ background: {x}; color: {} }}\n", if light { "#221c05" } else { "#ffffff" });
+    }
+    if let Some(f) = a.font.as_deref().map(|f| f.replace(['"', '\'', ';', '{', '}', '\\'], "")).filter(|f| !f.trim().is_empty()) {
+        c += &format!(".popover {{ font-family: \"{}\" }}\n", f.trim());
+    }
+    if let Some(w) = a.width { c += &format!(".popover {{ width: {}px }}\n", w.clamp(240.0, 800.0)); }
+    if let Some(h) = a.max_height { c += &format!(".popover {{ max-height: {}px }}\n", h.clamp(160.0, 1200.0)); }
+    if let Some(n) = a.senses { c += &format!(".sense {{ --max-count: {} }}\n", n.clamp(1, 30)); }
+    if let Some(n) = a.wiki_lines { c += &format!(".wiki-extract {{ -webkit-line-clamp: {} }}\n", n.clamp(1, 40)); }
+    for (on, selector) in [(a.pronunciation, ".pronunciation"), (a.examples, ".example"), (a.pictures, ".thumbnail"), (a.marker, ".marker"), (a.arrow, ".arrow"), (a.footer, ".footer")] {
+        if let Some(on) = on { c += &format!("{selector} {{ display: {} }}\n", if on { "block" } else { "none" }); }
+    }
+    match a.animations {
+        Some(false) => c += ".popover, .marker { transition: none }\n",
+        Some(true) => c += ".popover { transition: 320ms } .marker { transition: 300ms }\n",
+        None => {}
+    }
+    c
+}
+
+/// The themes for these settings and the user's sheet, which cascades over them.
+pub fn build_with(a: &Appearance, user: Option<&str>) -> (Theme, Theme, Vec<String>) {
     let mut warnings = Vec::new();
     let mut rules: Vec<(Rule, &str)> = parse(DEFAULT_CSS, "default.css", &mut warnings).into_iter().map(|r| (r, "default.css")).collect();
+    if let Some((id, _, css)) = THEMES.iter().find(|t| t.0 == a.theme).filter(|t| !t.2.is_empty()) {
+        let name: &'static str = intern(&format!("{id}.css"));
+        rules.extend(parse(css, name, &mut warnings).into_iter().map(|r| (r, name)));
+    }
+    rules.extend(parse(&appearance_css(a), "settings", &mut warnings).into_iter().map(|r| (r, "settings")));
     let name: &'static str = intern(&user_path().file_name().map_or("style.css".into(), |n| n.to_string_lossy().into_owned()));
     if let Some(src) = user { rules.extend(parse(src, name, &mut warnings).into_iter().map(|r| (r, name))); }
     let mut dup = Vec::new();
-    let light = compute(&rules, false, &mut warnings);
-    let dark = compute(&rules, true, &mut dup);
+    let mut light = compute(&rules, false, &mut warnings);
+    let mut dark = compute(&rules, true, &mut dup);
     for w in dup { if !warnings.contains(&w) { warnings.push(w); } }
+    let k = a.text_scale.clamp(0.6, 2.0);
+    if (k - 1.0).abs() > 0.001 { light.scale_text(k); dark.scale_text(k); }
     (light, dark, warnings)
+}
+
+impl Theme {
+    /// Every text, and the gaps that follow it, `k` times as large.
+    pub fn scale_text(&mut self, k: f32) {
+        for t in [&mut self.section_title, &mut self.link, &mut self.headword, &mut self.pronunciation, &mut self.note,
+                  &mut self.part_of_speech, &mut self.sense, &mut self.sense_number, &mut self.example, &mut self.synonyms,
+                  &mut self.synonyms_label, &mut self.wiki_title, &mut self.wiki_description, &mut self.wiki_extract, &mut self.status, &mut self.footer] {
+            t.size *= k;
+            t.line_height *= k;
+            t.letter_spacing *= k;
+        }
+        self.popover.gap *= k;
+    }
 }
 
 static CURRENT: RwLock<Option<Arc<(Theme, Theme)>>> = RwLock::new(None);
@@ -545,45 +613,14 @@ pub fn themes() -> Arc<(Theme, Theme)> {
 
 pub fn theme(dark: bool) -> Theme { let t = themes(); if dark { t.1.clone() } else { t.0.clone() } }
 
-/// Reloads the sheet whenever it's saved and calls `changed`. Editors save by writing in
-/// place or by renaming a new file over it, so this watches the folder.
+/// Reloads the sheet whenever it's saved and calls `changed`.
 pub fn watch(changed: impl Fn() + Send + 'static) {
-    let path = user_path();
-    let Some(dir) = path.parent().map(|d| d.to_path_buf()) else { return };
-    let _ = std::fs::create_dir_all(&dir);
-    std::thread::Builder::new().name("style-watch".into()).spawn(move || {
-        #[allow(unsafe_code)]
-        // SAFETY: plain inotify calls on a descriptor this thread owns.
-        unsafe {
-            let fd = libc::inotify_init1(libc::IN_CLOEXEC);
-            if fd < 0 { return; }
-            let c = std::ffi::CString::new(dir.to_string_lossy().as_bytes()).unwrap();
-            libc::inotify_add_watch(fd, c.as_ptr(), libc::IN_CLOSE_WRITE | libc::IN_MOVED_TO | libc::IN_CREATE | libc::IN_DELETE);
-            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let mut buf = [0u8; 4096];
-            loop {
-                let n = libc::read(fd, buf.as_mut_ptr().cast(), buf.len());
-                if n <= 0 { break; }
-                // Only our file: walk the events' names.
-                let mut off = 0usize;
-                let mut ours = false;
-                while off + 16 <= n as usize {
-                    let len = u32::from_ne_bytes(buf[off + 12..off + 16].try_into().unwrap()) as usize;
-                    let raw = &buf[off + 16..(off + 16 + len).min(n as usize)];
-                    let ev = String::from_utf8_lossy(&raw[..raw.iter().position(|b| *b == 0).unwrap_or(raw.len())]).into_owned();
-                    ours |= ev == name;
-                    off += 16 + len;
-                }
-                if !ours { continue; }
-                // Let a burst of writes settle.
-                std::thread::sleep(std::time::Duration::from_millis(80));
-                let warnings = reload();
-                if warnings.is_empty() { eprintln!("tlum: style reloaded"); }
-                for w in warnings { eprintln!("tlum: {w}"); }
-                changed();
-            }
-        }
-    }).ok();
+    crate::config::watch_file(user_path(), move || {
+        let warnings = reload();
+        if warnings.is_empty() { eprintln!("tlum: style reloaded"); }
+        for w in warnings { eprintln!("tlum: {w}"); }
+        changed();
+    });
 }
 
 #[cfg(test)]
@@ -592,7 +629,7 @@ mod tests {
 
     #[test]
     fn the_built_in_sheet_is_clean_and_complete() {
-        let (light, dark, warnings) = build(None);
+        let (light, dark, warnings) = build_with(&Appearance::default(), None);
         assert!(warnings.is_empty(), "{warnings:#?}");
         for t in [&light, &dark] {
             assert!(t.popover.width >= 200.0 && t.popover.background.0[3] == 255);
@@ -627,13 +664,13 @@ mod tests {
             .wiki-extract { -webkit-line-clamp: 3 }
             .marker { background: hsl(200, 80%, 60%); transition: none }
         "#;
-        let (light, dark, warnings) = build(Some(css));
+        let (light, dark, warnings) = build_with(&Appearance::default(), Some(css));
         assert!(warnings.is_empty(), "{warnings:#?}");
         assert_eq!(light.headword.color, Rgba([255, 0, 102, 255]));
         assert_eq!(dark.sense_number.color, Rgba([255, 0, 102, 255]));
         assert_eq!(light.headword.size, 30.0);
         assert_eq!(light.headword.family, Some("Noto Serif, serif"));
-        assert_eq!(build(Some(".link { font-family: sans-serif }")).0.link.family, Some(""), "the default sans, not the popover's font");
+        assert_eq!(build_with(&Appearance::default(), Some(".link { font-family: sans-serif }")).0.link.family, Some(""), "the default sans, not the popover's font");
         assert_eq!(dark.popover.background, Rgba([0, 0, 0, 0xcc]));
         assert!(dark.popover.shadow.is_none() && dark.popover.border_width == 0.0);
         assert!(light.popover.shadow.is_some(), "the light scheme keeps its shadow");
@@ -643,9 +680,31 @@ mod tests {
     }
 
     #[test]
+    fn settings_cascade_between_the_theme_and_the_users_sheet() {
+        let a = Appearance { theme: "paper".into(), accent: Some("#ff0000".into()), width: Some(500.0), examples: Some(false), text_scale: 1.5, ..Appearance::default() };
+        let (light, _, warnings) = build_with(&a, None);
+        assert!(warnings.is_empty(), "{warnings:#?}");
+        assert_eq!(light.link.color, Rgba([255, 0, 0, 255]));
+        assert_eq!(light.popover.width, 500.0);
+        assert!(light.example.hidden);
+        let (paper, _, _) = build_with(&Appearance { theme: "paper".into(), ..Appearance::default() }, None);
+        assert_eq!(light.headword.size, paper.headword.size * 1.5);
+        // The user's sheet still wins.
+        let (light, _, _) = build_with(&a, Some(".popover { width: 300px }"));
+        assert_eq!(light.popover.width, 300.0);
+        // Every theme reads cleanly, and settings can show what a theme hides.
+        for (id, _, _) in THEMES {
+            let (_, _, w) = build_with(&Appearance { theme: id.into(), ..Appearance::default() }, None);
+            assert!(w.is_empty(), "{id}: {w:#?}");
+        }
+        let (min, _, _) = build_with(&Appearance { theme: "minimal".into(), marker: Some(true), ..Appearance::default() }, None);
+        assert!(!min.marker.hidden);
+    }
+
+    #[test]
     fn mistakes_are_reported_with_their_lines() {
         let css = ".headword {\n  colour: red;\n  font-size: big;\n}\n.nope { color: red }\n.sense { color: var(--missing) }\n";
-        let (_, _, w) = build(Some(css));
+        let (_, _, w) = build_with(&Appearance::default(), Some(css));
         assert!(w.iter().any(|w| w.starts_with("style.css:2:") && w.contains("colour")), "{w:#?}");
         assert!(w.iter().any(|w| w.starts_with("style.css:3:") && w.contains("big")), "{w:#?}");
         assert!(w.iter().any(|w| w.contains(".nope")), "{w:#?}");
