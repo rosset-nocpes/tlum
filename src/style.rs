@@ -611,8 +611,6 @@ pub fn themes() -> Arc<(Theme, Theme)> {
     CURRENT.read().unwrap().clone().unwrap()
 }
 
-pub fn theme(dark: bool) -> Theme { let t = themes(); if dark { t.1.clone() } else { t.0.clone() } }
-
 /// Reloads the sheet whenever it's saved and calls `changed`.
 pub fn watch(changed: impl Fn() + Send + 'static) {
     crate::config::watch_file(user_path(), move || {

@@ -103,7 +103,7 @@ impl Settings {
             let (l, d, _) = style::build_with(&Appearance { theme: id.to_string(), ..Appearance::default() }, None);
             (l, d)
         }).collect();
-        let own_shortcut = matches!(crate::desktop::kind(&config.backend, zbus::blocking::Connection::session().ok().as_ref()), crate::desktop::Kind::KWin | crate::desktop::Kind::X11);
+        let own_shortcut = matches!(crate::desktop::kind(&config.backend, bus()), crate::desktop::Kind::KWin | crate::desktop::Kind::X11);
         Settings {
             page: Page::General, shortcut: TextEdit::new(config.shortcut.clone()), config, error, notice: None, busy: false, open: None, force_dark: None,
             installed: library::installed(), catalog: None, search: TextEdit::new(""), downloads: Arc::default(), cancelled: Arc::default(), reorder: None,
@@ -171,9 +171,18 @@ impl Settings {
     }
 }
 
+/// The window's session bus connection, opened once it can be: the status check asks every
+/// few seconds, and tries again while the bus can't be reached.
+fn bus() -> Option<&'static zbus::blocking::Connection> {
+    static BUS: std::sync::OnceLock<zbus::blocking::Connection> = std::sync::OnceLock::new();
+    if let Some(c) = BUS.get() { return Some(c); }
+    let c = zbus::blocking::Connection::session().ok()?;
+    Some(BUS.get_or_init(|| c))
+}
+
 fn daemon_running() -> bool {
-    zbus::blocking::Connection::session().ok()
-        .and_then(|c| zbus::blocking::fdo::DBusProxy::new(&c).ok().and_then(|d| d.name_has_owner(crate::kwin::SERVICE.try_into().ok()?).ok()))
+    bus().and_then(|c| c.call_method(Some("org.freedesktop.DBus"), "/org/freedesktop/DBus", Some("org.freedesktop.DBus"), "NameHasOwner", &(crate::kwin::SERVICE,)).ok())
+        .and_then(|reply| reply.body().deserialize::<bool>().ok())
         .unwrap_or(false)
 }
 
@@ -195,8 +204,10 @@ fn setup(s: &mut Settings, waker: rune::Waker) {
 
 fn poll(s: &mut Settings, _: f64, tx: &mut Tx) -> bool {
     let msgs: Vec<Msg> = std::mem::take(&mut *s.inbox.lock().unwrap());
-    let mut changed = !msgs.is_empty();
+    let mut changed = false;
     for m in msgs {
+        // The status check comes every few seconds and mostly finds nothing new.
+        changed |= !matches!(m, Msg::Running(on) if s.running == Some(on) && !s.busy);
         match m {
             Msg::Catalog(c) => s.catalog = Some(c),
             Msg::Installed(id, r) => {
@@ -308,10 +319,19 @@ fn slider(k: &Kit, key: &str, label: &str, value: f32, (min, max, step): (f32, f
         .range_value(f64::from(value), f64::from(min), f64::from(max)).range_step(f64::from(step)).a11y_value(show.clone())
         .on_step(move |s: &mut Settings, steps, _| { let v = (get(s) + steps as f32 * step).clamp(min, max); set(s, v); s.save(); })
         .size(w, h)
-        .on_drag(move |s: &mut Settings, d: &mut Drag, tx| match d.phase {
-            Phase::Down => { d.data = get(s); set(s, at(d.x)); s.restyle(); }
-            Phase::Move => { set(s, at(d.x)); s.restyle(); tx.instant(); }
-            Phase::Up => { if d.cancelled() { set(s, d.data); } s.save(); }
+        .on_drag(move |s: &mut Settings, d: &mut Drag, tx| {
+            // Most moves stay within a step, and most sliders aren't the popover's look: parse
+            // the CSS again only when the appearance changed.
+            let moved = |s: &mut Settings, v: f32| {
+                let was = s.config.appearance.clone();
+                set(s, v);
+                if s.config.appearance != was { s.restyle(); }
+            };
+            match d.phase {
+                Phase::Down => { d.data = get(s); moved(s, at(d.x)); }
+                Phase::Move => { moved(s, at(d.x)); tx.instant(); }
+                Phase::Up => { if d.cancelled() { set(s, d.data); } s.save(); }
+            }
         })
         .child(el().size(w, bar).absolute(0.0, (h - bar) / 2.0).radius(bar / 2.0).fill(k.c.border_base).a11y_hidden())
         .child(el().size(knob / 2.0 + frac * travel, bar).absolute(0.0, (h - bar) / 2.0).radius(bar / 2.0).fill(accent(dark)).a11y_hidden())
@@ -507,7 +527,7 @@ fn restart(s: &mut Settings, start: bool) {
         }
         if start {
             let null = std::process::Stdio::null;
-            if let Ok(mut child) = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).stdin(null()).stdout(null()).stderr(null()).spawn()) {
+            if let Ok(mut child) = std::env::current_exe().and_then(|exe| crate::gpu::scrub(std::process::Command::new(exe).stdin(null()).stdout(null()).stderr(null())).spawn()) {
                 std::thread::spawn(move || child.wait());
             }
             for _ in 0..60 { if daemon_running() { break; } std::thread::sleep(Duration::from_millis(50)); }
@@ -806,7 +826,7 @@ fn theme_tile(s: &Settings, k: &Kit, i: usize, dark: bool) -> El {
 
 /// The sample popover the settings preview: the built-in sections, in the settings' order.
 fn sample(c: &Config) -> crate::ui::Shown {
-    let mut v = crate::preview::shown([0.0, 0.0, 96.0, 24.0], Part::Found(crate::preview::definition()), Part::Found(crate::preview::wiki()));
+    let mut v = crate::preview::unmarked([0.0, 0.0, 96.0, 24.0], Part::Found(crate::preview::definition()), Part::Found(crate::preview::wiki()));
     let all: Vec<Section> = std::mem::take(&mut v.sections);
     let order = c.active_sources();
     v.sections = order.iter().filter_map(|id| all.iter().find(|x| &x.id == id).cloned()).collect();
@@ -894,7 +914,7 @@ fn appearance(s: &Settings, k: &Kit, layer: &mut Vec<El>, system_dark: bool) -> 
         (Some(_), n) => format!("{} is in use, with {n} problem{}:", path.display(), if n == 1 { "" } else { "s" }),
     };
     let mut css_rows = vec![setting(k, "css", "Custom CSS", Some(&css_state), row().gap(8.0)
-        .child(button(k, if s.user_css.is_some() { "Edit" } else { "Create" }, ButtonVariant::Neutral, |s, tx| {
+        .child(button(k, if s.user_css.is_some() { "Edit" } else { "Create" }, ButtonVariant::Neutral, |s, _| {
             let path = style::user_path();
             if !path.exists() {
                 let made = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&path, style::DEFAULT_CSS));
@@ -902,7 +922,7 @@ fn appearance(s: &Settings, k: &Kit, layer: &mut Vec<El>, system_dark: bool) -> 
                 s.user_css = Some(style::DEFAULT_CSS.to_string());
                 s.restyle();
             }
-            if tx.open_url(&format!("file://{}", path.display())).is_err() { s.error = Some(format!("Couldn't open {}", path.display())); }
+            if let Err(e) = crate::desktop::open_path(&path) { s.error = Some(format!("Couldn't open {}: {e}", path.display())); }
         }))
         .child(button(k, "Reload", ButtonVariant::Ghost, |s, _| { s.user_css = std::fs::read_to_string(style::user_path()).ok(); s.restyle(); })))];
     if s.user_css.is_some() && !s.css_warnings.is_empty() {
@@ -959,7 +979,7 @@ fn advanced(s: &Settings, k: &Kit, layer: &mut Vec<El>) -> El {
         button(k, if s.doctor.is_some() { "Check Again" } else { "Run Checks" }, ButtonVariant::Neutral, |s, _| {
             s.doctor = Some(String::new());
             s.spawn(|| {
-                let out = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg("doctor").output());
+                let out = std::env::current_exe().and_then(|exe| crate::gpu::scrub(std::process::Command::new(exe).arg("doctor")).output());
                 Msg::Doctor(match out { Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr), Err(e) => e.to_string() })
             });
         }))];
@@ -972,11 +992,15 @@ fn advanced(s: &Settings, k: &Kit, layer: &mut Vec<El>) -> El {
 
     let files = card(k, "files", Some("Files"), vec![
         setting(k, "config-file", "Settings file", Some(&config::config_path().display().to_string()),
-            button(k, "Open", ButtonVariant::Ghost, |s, tx| { if tx.open_url(&format!("file://{}", config::config_path().display())).is_err() { s.error = Some("Couldn't open the settings file".into()); } })),
+            button(k, "Open", ButtonVariant::Ghost, |s, _| {
+                // Nothing saved yet: write the settings as they are, so there's a file to open.
+                if !config::config_path().exists() { s.save(); }
+                if let Err(e) = crate::desktop::open_path(&config::config_path()) { s.error = Some(format!("Couldn't open the settings file: {e}")); }
+            })),
         setting(k, "dict-folder", "Dictionaries folder", Some(&library::dir().display().to_string()),
-            button(k, "Open", ButtonVariant::Ghost, |s, tx| {
+            button(k, "Open", ButtonVariant::Ghost, |s, _| {
                 let _ = std::fs::create_dir_all(library::dir());
-                if tx.open_url(&format!("file://{}", library::dir().display())).is_err() { s.error = Some("Couldn't open the folder".into()); }
+                if let Err(e) = crate::desktop::open_path(&library::dir()) { s.error = Some(format!("Couldn't open the folder: {e}")); }
             })),
         setting(k, "reset", "Reset all settings", Some("Back to how tlum came. Dictionaries you downloaded stay."),
             if s.confirm_reset {
@@ -1037,8 +1061,8 @@ pub fn run(mut args: Vec<String>) {
     if page.is_some() || args.first().is_some_and(|a| !a.starts_with('-')) { args.remove(0); }
     // Headless runs (`--snap`, `--tree`, …) stand alone.
     let headless = !args.is_empty();
-    let bus = if headless { None } else { zbus::blocking::Connection::session().ok() };
-    if let Some(c) = &bus {
+    let bus = if headless { None } else { bus() };
+    if let Some(c) = bus {
         match c.request_name_with_flags(BUS_NAME, zbus::fdo::RequestNameFlags::DoNotQueue.into()) {
             Ok(zbus::fdo::RequestNameReply::PrimaryOwner) | Err(_) => {}
             Ok(_) => {
@@ -1052,6 +1076,6 @@ pub fn run(mut args: Vec<String>) {
     let app = rune::App::new(spec()).args(args);
     let handle = app.handle();
     if let Some(p) = page { handle.update(move |s, _| s.go(p)); }
-    if let Some(c) = &bus { let _ = c.object_server().at(BUS_PATH, Window { handle }); }
+    if let Some(c) = bus { let _ = c.object_server().at(BUS_PATH, Window { handle }); }
     app.run();
 }

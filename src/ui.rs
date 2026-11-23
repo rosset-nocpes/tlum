@@ -190,7 +190,7 @@ pub fn on_key(s: &mut Popover, e: &KeyEvent, tx: &mut Tx) -> bool {
         }
         Key::Enter => {
             if let Some(url) = s.shown.as_ref().and_then(|v| v.sections.iter().find_map(|s| s.url().map(str::to_string))) {
-                let _ = tx.open_url(&url);
+                if let Err(e) = crate::desktop::open_link(&url) { eprintln!("tlum: {e}"); }
                 dismiss(s);
             }
             true
@@ -252,7 +252,7 @@ fn section_from(t: &Theme, label: &str, url: Option<&str>, from: Option<&str>, l
         let mut link = txt(&t.link, format!("{} ↗", link_name(url)), f);
         if live {
             let url = url.to_string();
-            link = link.cursor(rune::Cursor::Pointer).on_press_tx(move |s: &mut Popover, tx| { let _ = tx.open_url(&url); dismiss(s); });
+            link = link.cursor(rune::Cursor::Pointer).on_press(move |s: &mut Popover| { if let Err(e) = crate::desktop::open_link(&url) { eprintln!("tlum: {e}"); } dismiss(s); });
         }
         header = header.child(link);
     }
@@ -341,7 +341,7 @@ fn hidden(t: &Theme, s: &Section) -> bool {
 pub fn open_settings() {
     let Ok(exe) = std::env::current_exe() else { return };
     let null = std::process::Stdio::null;
-    match std::process::Command::new(exe).arg("settings").stdin(null()).stdout(null()).spawn() {
+    match crate::gpu::scrub(std::process::Command::new(exe).arg("settings").stdin(null()).stdout(null())).spawn() {
         // Reap it when it closes.
         Ok(mut child) => { std::thread::spawn(move || child.wait()); }
         Err(e) => eprintln!("tlum: couldn't open the settings: {e}"),
@@ -461,7 +461,8 @@ pub fn view(s: &Popover, cx: &mut Cx<Popover>) -> El {
     };
     let Some(v) = &s.shown else { return root };
     let dark = s.force_dark.or_else(|| crate::config::current().appearance.forced_dark()).unwrap_or_else(|| cx.system_dark());
-    let t = crate::style::theme(dark);
+    let themes = crate::style::themes();
+    let t = if dark { &themes.1 } else { &themes.0 };
     let off = offset(s, v);
     let surface = s.size.unwrap_or([v.screen[0] - off[0], v.screen[1] - off[1]]);
     let word = [v.word[0] - off[0], v.word[1] - off[1], v.word[2], v.word[3]];
@@ -471,9 +472,9 @@ pub fn view(s: &Popover, cx: &mut Cx<Popover>) -> El {
         let (x1, y1) = ((a[0] + a[2] - off[0]).min(surface[0]), (a[1] + a[3] - off[1]).min(surface[1]));
         [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)]
     });
-    let (left, below, arrow_x, room) = place([word[0] - fit[0], word[1] - fit[1], word[2], word[3]], [fit[2], fit[3]], &t);
+    let (left, below, arrow_x, room) = place([word[0] - fit[0], word[1] - fit[1], word[2], word[3]], [fit[2], fit[3]], t);
     let left = left + fit[0];
-    let mut pop_el = popover(&t, v, below, arrow_x, room, Some(s.scroll.clone()));
+    let mut pop_el = popover(t, v, below, arrow_x, room, Some(s.scroll.clone()));
     pop_el = if below {
         pop_el.pin(Some(left), Some(word[1] + word[3] + 2.0), None, None)
     } else {
@@ -632,15 +633,16 @@ mod tests {
     #[test]
     fn the_popover_hangs_below_with_room_and_flips_above_near_the_bottom() {
         let screen = [1920.0, 1080.0];
-        let t = crate::style::theme(false);
-        let (left, below, arrow, room) = place([500.0, 100.0, 60.0, 18.0], screen, &t);
+        let themes = crate::style::themes();
+        let t = &themes.0;
+        let (left, below, arrow, room) = place([500.0, 100.0, 60.0, 18.0], screen, t);
         assert!(below && room >= 260.0);
         assert!((left + arrow + t.arrow.width / 2.0 - 530.0).abs() < 0.01, "arrow points at the word's middle");
-        let (_, below, _, _) = place([500.0, 1000.0, 60.0, 18.0], screen, &t);
+        let (_, below, _, _) = place([500.0, 1000.0, 60.0, 18.0], screen, t);
         assert!(!below);
         // At the screen's edge the panel stays on screen and the arrow follows the word,
         // clear of the panel's rounded corner.
-        let (left, _, arrow, _) = place([2.0, 100.0, 30.0, 18.0], screen, &t);
+        let (left, _, arrow, _) = place([2.0, 100.0, 30.0, 18.0], screen, t);
         assert_eq!(left, EDGE);
         assert_eq!(arrow, t.popover.radius + 2.0);
     }

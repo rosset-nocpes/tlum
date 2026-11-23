@@ -152,3 +152,30 @@ impl Desktop for Wayland {
         crate::selection::primary().or_else(|| self.xwayland.as_ref().and_then(|x| x.primary(Duration::from_millis(250))))
     }
 }
+
+// --- opening links and files ----------------------------------------------------------------
+
+/// Opens a web link from a dictionary's answer in the browser. Only `http(s)` links: the
+/// address came over the network.
+pub fn open_link(url: &str) -> Result<(), String> {
+    let web = url.starts_with("https://") || url.starts_with("http://");
+    if !web || url.chars().any(|c| c.is_whitespace() || c.is_control()) { return Err(format!("not a web link: {url:?}")); }
+    xdg_open(std::ffi::OsStr::new(url))
+}
+
+/// Opens one of tlum's own files or folders in the app the desktop has for it.
+pub fn open_path(path: &std::path::Path) -> Result<(), String> {
+    if !path.is_absolute() { return Err(format!("not a full path: {}", path.display())); }
+    xdg_open(path.as_os_str())
+}
+
+/// `xdg-open`, without tlum's GPU driver choice: the browser it may start keeps its environment
+/// for the session (`gpu::scrub`).
+fn xdg_open(target: &std::ffi::OsStr) -> Result<(), String> {
+    let null = std::process::Stdio::null;
+    let mut child = crate::gpu::scrub(std::process::Command::new("xdg-open").arg(target).stdin(null()).stdout(null()).stderr(null()))
+        .spawn().map_err(|e| format!("xdg-open: {e}"))?;
+    // Reap it so it doesn't linger as a zombie.
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}

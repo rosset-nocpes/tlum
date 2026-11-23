@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -62,9 +62,45 @@ fn folder_size(dir: &Path) -> u64 {
     std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| e.metadata().ok()).filter(|m| m.is_file()).map(|m| m.len()).sum()
 }
 
-/// Every installed dictionary, by name.
-pub fn installed() -> Vec<Installed> {
-    let mut v: Vec<Installed> = std::fs::read_dir(dir()).into_iter().flatten().flatten().filter_map(|e| {
+/// What `installed` read the list from: each dictionary folder's name and modification time
+/// (files made or removed in it) and its `tlum.json`'s time and length (written in place).
+type Stamps = Vec<(std::ffi::OsString, SystemTime, Option<(SystemTime, u64)>)>;
+
+/// The folder's stamps, or `None` when one can't be read (then nothing is cached).
+fn stamps(base: &Path) -> Option<Stamps> {
+    let mut v = Vec::new();
+    for e in std::fs::read_dir(base).ok()?.flatten() {
+        let name = e.file_name();
+        if name.as_encoded_bytes().starts_with(b".") { continue; }
+        let at = e.metadata().and_then(|m| m.modified()).ok()?;
+        let meta = std::fs::metadata(e.path().join("tlum.json")).ok().map(|m| m.modified().map(|t| (t, m.len()))).transpose().ok()?;
+        v.push((name, at, meta));
+    }
+    v.sort();
+    Some(v)
+}
+
+/// Every installed dictionary, by name. Lookups and the settings ask often, so the list is
+/// kept while nothing in the folder changes, whichever process (or file manager) changes it:
+/// a `stat` or two per dictionary instead of reading each one's metadata and sizing its files.
+pub fn installed() -> Vec<Installed> { installed_in(dir()) }
+
+fn installed_in(base: PathBuf) -> Vec<Installed> {
+    static LISTED: Mutex<Option<(PathBuf, Stamps, Vec<Installed>)>> = Mutex::new(None);
+    let now = stamps(&base);
+    let mut listed = LISTED.lock().unwrap();
+    if let (Some((at, was, v)), Some(now)) = (listed.as_ref(), &now) && *at == base && was == now { return v.clone(); }
+    let v = scan_installed(&base);
+    // A stamp from the last moment may be shared by a change still under way (timestamps are
+    // coarse, 2 s on FAT): keep only lists of a folder that has been still for a while.
+    let still = |s: &Stamps| s.iter().flat_map(|(_, a, m)| [Some(*a), m.map(|m| m.0)]).flatten()
+        .all(|t| t.elapsed().is_ok_and(|age| age > Duration::from_secs(3)));
+    *listed = now.filter(still).map(|s| (base, s, v.clone()));
+    v
+}
+
+fn scan_installed(base: &Path) -> Vec<Installed> {
+    let mut v: Vec<Installed> = std::fs::read_dir(base).into_iter().flatten().flatten().filter_map(|e| {
         let id = e.file_name().to_string_lossy().into_owned();
         if id.starts_with('.') { return None; }
         let meta = std::fs::read_to_string(e.path().join("tlum.json")).ok()?;
@@ -87,7 +123,12 @@ static OPEN: Mutex<Vec<(String, Arc<Result<Book, String>>)>> = Mutex::new(Vec::n
 
 fn open(id: &str) -> Arc<Result<Book, String>> {
     let mut all = OPEN.lock().unwrap();
-    if let Some((_, b)) = all.iter().find(|(i, _)| i == id) { return b.clone(); }
+    if let Some((_, b)) = all.iter().find(|(i, _)| i == id) {
+        let changed = match &**b { Ok(Book::WordNet(w)) => w.changed(), Ok(Book::StarDict(s)) => s.changed(), Err(_) => false };
+        // Its files were copied over or replaced: read them afresh (`Mapped::changed`).
+        if !changed { return b.clone(); }
+        all.retain(|(i, _)| i != id);
+    }
     let path = dir().join(id);
     let kind = std::fs::read_to_string(path.join("tlum.json")).ok().and_then(|m| serde_json::from_str::<Installed>(&m).ok()).map(|m| m.kind);
     let book = Arc::new(match kind {
@@ -459,6 +500,29 @@ mod tests {
         assert_eq!(v[0].size, 102492);
         assert!(v[0].detail.contains("5,129 entries"));
         assert!(v[0].matches("english") && v[0].matches("afr") && !v[0].matches("german"));
+    }
+
+    /// A dictionary copied in by hand (its folder first, `tlum.json` later) still shows up,
+    /// though the list was kept in between and the dictionaries folder itself didn't change.
+    #[test]
+    fn the_installed_list_follows_a_dictionary_copied_in_by_hand() {
+        let base = std::env::temp_dir().join(format!("tlum-installed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let wordnet = base.join("wordnet");
+        std::fs::create_dir_all(&wordnet).unwrap();
+        let age = |p: &Path| std::fs::File::open(p).unwrap().set_modified(SystemTime::now() - Duration::from_secs(60)).unwrap();
+        age(&wordnet);
+        age(&base);
+        assert!(installed_in(base.clone()).is_empty());
+        assert!(installed_in(base.clone()).is_empty(), "kept");
+        std::fs::write(wordnet.join("tlum.json"), r#"{ "name": "WordNet", "kind": "wordnet" }"#).unwrap();
+        age(&wordnet);
+        age(&wordnet.join("tlum.json"));
+        let names: Vec<String> = installed_in(base.clone()).into_iter().map(|d| d.name).collect();
+        assert_eq!(names, ["WordNet"]);
+        std::fs::write(wordnet.join("tlum.json"), r#"{ "name": "WordNet 3.1", "kind": "wordnet" }"#).unwrap();
+        assert_eq!(installed_in(base.clone())[0].name, "WordNet 3.1", "rewritten in place");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

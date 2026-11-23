@@ -63,13 +63,16 @@ impl<T> Part<T> {
 
 const UA: &str = concat!("tlum/", env!("CARGO_PKG_VERSION"), " (desktop dictionary popover)");
 
+/// One agent for every lookup, so its TLS setup is made once and its pool keeps connections to
+/// the dictionary and Wikipedia open between lookups that come close together.
 fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(8)))
         .http_status_as_error(false)
         .user_agent(UA)
         .build()
-        .into()
+        .into()).clone()
 }
 
 fn get_json<T: for<'de> Deserialize<'de>>(agent: &ureq::Agent, url: &str) -> Result<Option<T>, String> {
