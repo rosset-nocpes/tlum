@@ -180,12 +180,13 @@ fn style_command(arg: Option<&str>) -> Result<(), String> {
 fn lookup(word: &str) {
     let c = Config::load();
     let ids = c.active_sources();
-    let l = dict::Lookup::new(word, &c.language, c.offline);
+    let l = dict::Lookup::new(word, &c.language, c.offline, &ids);
     for mut s in dict::sections(&ids) {
         s.part = l.fetch(&s.id);
         println!("== {}", s.title);
         match &s.part {
             dict::Part::Found(dict::Entry::Definition(d)) => {
+                if let Some(src) = &d.source { println!("(from {src})"); }
                 println!("{}{}{}", d.headword, d.phonetic.as_ref().map(|p| format!("  {p}")).unwrap_or_default(), d.note.as_ref().map(|n| format!("  ({n})")).unwrap_or_default());
                 for m in &d.meanings {
                     if s.kind == dict::Kind::Thesaurus {

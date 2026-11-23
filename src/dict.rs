@@ -37,6 +37,9 @@ pub struct Definition {
     /// "Inflection of …" when the word was found under another form.
     pub note: Option<String>,
     pub url: String,
+    /// The dictionary that answered, when it isn't the section's own: an offline one standing
+    /// in for the online dictionary. The section's header names it in place of its link.
+    pub source: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -140,7 +143,7 @@ fn from_free_dictionary(entries: Vec<FdEntry>) -> Option<Definition> {
         }
     }
     meanings.retain(|m| !m.senses.is_empty());
-    (!meanings.is_empty()).then_some(Definition { headword, phonetic, meanings, note: None, url })
+    (!meanings.is_empty()).then_some(Definition { headword, phonetic, meanings, note: None, url, source: None })
 }
 
 // --- Wiktionary REST ------------------------------------------------------------------------
@@ -173,7 +176,7 @@ fn from_wiktionary(word: &str, lang: &str, mut by_lang: HashMap<String, Vec<WtUs
         ..Meaning::default()
     }).filter(|m| !m.senses.is_empty()).collect();
     (!meanings.is_empty()).then(|| Definition {
-        headword: word.to_string(), phonetic: None, meanings, note: None,
+        headword: word.to_string(), phonetic: None, meanings, note: None, source: None,
         url: format!("https://{lang}.wiktionary.org/wiki/{}", enc(word)),
     })
 }
@@ -338,12 +341,29 @@ pub struct Lookup {
     pub query: String,
     pub language: String,
     pub offline: bool,
+    /// The sources this lookup shows: an offline dictionary with a section of its own doesn't
+    /// stand in for the online one too.
+    shown: Vec<String>,
     online: Mutex<Option<Part<Definition>>>,
 }
 
 impl Lookup {
-    pub fn new(query: &str, language: &str, offline: bool) -> Lookup {
-        Lookup { query: query.to_string(), language: language.to_string(), offline, online: Mutex::new(None) }
+    pub fn new(query: &str, language: &str, offline: bool, shown: &[String]) -> Lookup {
+        Lookup { query: query.to_string(), language: language.to_string(), offline, shown: shown.to_vec(), online: Mutex::new(None) }
+    }
+
+    /// The online dictionary's stand-in: the first installed dictionary of the lookup
+    /// language that has the word (WordNet first, for English), among those not shown anyway.
+    fn offline_definition(&self) -> Option<Definition> {
+        let lang = crate::library::iso3(&self.language);
+        let mut candidates: Vec<crate::library::Installed> = crate::library::installed().into_iter()
+            .filter(|d| !self.shown.contains(&d.id) && d.language.as_deref() == Some(lang))
+            .collect();
+        candidates.sort_by_key(|d| d.id != "wordnet");
+        candidates.into_iter().find_map(|d| match crate::library::define(&d.id, &self.query, lang == "eng") {
+            Part::Found(mut def) => { def.source = Some(d.name); Some(def) }
+            _ => None,
+        })
     }
 
     fn online(&self) -> Part<Definition> {
@@ -355,8 +375,18 @@ impl Lookup {
     pub fn fetch(&self, id: &str) -> Part<Entry> {
         let english = |lang: Option<&str>| lang.map_or(self.query.is_ascii(), |l| l == "eng");
         match id {
-            "dictionary" if self.offline => Part::Missing,
-            "dictionary" => to_entry(self.online()),
+            // Online, and an installed dictionary when the network fails, the word isn't there,
+            // or tlum is offline.
+            "dictionary" => {
+                let online = if self.offline { Part::Missing } else { self.online() };
+                match online {
+                    Part::Found(d) => Part::Found(Entry::Definition(d)),
+                    other => match self.offline_definition() {
+                        Some(d) => Part::Found(Entry::Definition(d)),
+                        None => to_entry(other),
+                    },
+                }
+            }
             "wikipedia" if self.offline => Part::Missing,
             "wikipedia" => match wikipedia(&self.query, &self.language) {
                 Part::Found(w) => Part::Found(Entry::Wiki(w)),

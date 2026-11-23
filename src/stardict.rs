@@ -124,7 +124,7 @@ impl StarDict {
         if senses.len() > 1 && senses[0].text.eq_ignore_ascii_case(&headword) { senses.remove(0); }
         senses.dedup();
         (!senses.is_empty()).then(|| Definition {
-            headword, phonetic, note: None, url: String::new(),
+            headword, phonetic, note: None, url: String::new(), source: None,
             meanings: vec![Meaning { part_of_speech: String::new(), senses, ..Meaning::default() }],
         })
     }

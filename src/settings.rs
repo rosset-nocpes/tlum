@@ -532,9 +532,22 @@ fn source_row(s: &Settings, k: &Kit, i: usize, src: &Source) -> El {
     let builtin = BUILT_IN.iter().find(|b| b.0 == src.id);
     let installed = s.installed.iter().find(|d| d.id == src.id);
     let name = builtin.map(|b| b.1.to_string()).or_else(|| installed.map(|d| d.name.clone())).unwrap_or_else(|| src.id.clone());
-    let off = s.config.offline && matches!(src.id.as_str(), "dictionary" | "wikipedia");
+    let off = s.config.offline && src.id == "wikipedia";
+    let offline_answer = || {
+        let lang = library::iso3(&s.config.language);
+        s.installed.iter().filter(|d| d.language.as_deref() == Some(lang)).min_by_key(|d| d.id != "wordnet").map(|d| d.name.clone())
+    };
     let about = if off {
         "Off while “Offline only” is on".to_string()
+    } else if s.config.offline && src.id == "dictionary" {
+        match offline_answer() {
+            Some(n) => format!("Offline · answered by {n}"),
+            None => "Offline · download a dictionary below to answer it".to_string(),
+        }
+    } else if s.config.offline && src.id == "thesaurus" {
+        if s.installed.iter().any(|d| d.id == "wordnet") { "Offline · answered by WordNet".into() } else { "Offline · download WordNet below to answer it".into() }
+    } else if src.id == "dictionary" && let Some(n) = offline_answer() {
+        format!("Online · Wiktionary, or {n} when it can't answer")
     } else if let Some(b) = builtin {
         format!("Online · {}", b.2)
     } else if let Some(d) = installed {

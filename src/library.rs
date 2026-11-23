@@ -167,6 +167,19 @@ struct FdRelease {
     #[serde(default)] date: String,
 }
 
+/// The ISO 639-3 code for a Wikipedia language code (`en` → `eng`), as dictionaries are marked.
+pub fn iso3(code: &str) -> &str {
+    match code {
+        "af" => "afr", "ar" => "ara", "bg" => "bul", "br" => "bre", "ca" => "cat", "cs" => "ces", "cy" => "cym", "da" => "dan",
+        "de" => "deu", "el" => "ell", "en" => "eng", "eo" => "epo", "es" => "spa", "fi" => "fin", "fr" => "fra", "ga" => "gle",
+        "gd" => "gla", "he" => "heb", "hi" => "hin", "hr" => "hrv", "hu" => "hun", "id" => "ind", "is" => "isl", "it" => "ita",
+        "ja" => "jpn", "ko" => "kor", "la" => "lat", "lt" => "lit", "mk" => "mkd", "nb" => "nob", "nl" => "nld", "nn" => "nno",
+        "no" => "nor", "pl" => "pol", "pt" => "por", "ro" => "ron", "ru" => "rus", "sk" => "slk", "sl" => "slv", "sr" => "srp",
+        "sv" => "swe", "sw" => "swh", "tr" => "tur", "uk" => "ukr", "zh" => "zho",
+        other => other,
+    }
+}
+
 /// English names of the languages FreeDict covers (ISO 639-3).
 pub fn language_name(code: &str) -> &str {
     match code {

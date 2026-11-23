@@ -25,6 +25,7 @@ pub(crate) fn definition() -> Definition {
         }],
         note: None,
         url: "https://en.wiktionary.org/wiki/serendipity".into(),
+        source: None,
     }
 }
 

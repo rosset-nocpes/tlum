@@ -54,7 +54,7 @@ fn yes() -> bool { true }
 
 /// The online sources, by id, with what the settings call them.
 pub const BUILT_IN: [(&str, &str, &str); 3] = [
-    ("dictionary", "Dictionary", "English definitions from Wiktionary (other languages: the language below)"),
+    ("dictionary", "Dictionary", "Wiktionary's definitions, or a downloaded dictionary's when it can't answer"),
     ("thesaurus", "Thesaurus", "Synonyms and opposites"),
     ("wikipedia", "Wikipedia", "The article's summary and picture"),
 ];
@@ -169,10 +169,10 @@ impl Config {
         v
     }
 
-    /// The sources a lookup asks, in order: those on, less the online ones when offline (the
-    /// thesaurus stays: WordNet answers it offline).
+    /// The sources a lookup asks, in order: those on, less Wikipedia when offline (the
+    /// dictionary and thesaurus stay: downloaded dictionaries answer them).
     pub fn active_sources(&self) -> Vec<String> {
-        self.sources().into_iter().filter(|s| s.enabled && !(self.offline && matches!(s.id.as_str(), "dictionary" | "wikipedia"))).map(|s| s.id).collect()
+        self.sources().into_iter().filter(|s| s.enabled && !(self.offline && s.id == "wikipedia")).map(|s| s.id).collect()
     }
 
     pub fn gestures(&self) -> Settings {

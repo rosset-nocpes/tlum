@@ -81,7 +81,10 @@ restarts it.
   them, as on macOS. Besides the online Dictionary, Thesaurus and Wikipedia you can download
   WordNet (an offline English dictionary and thesaurus) and FreeDict's bilingual dictionaries,
   or add any StarDict dictionary (`.ifo`, a folder or an archive, such as GoldenDict's).
-  **Offline only** uses downloaded dictionaries alone, so nothing leaves the computer.
+  When the online Dictionary can't answer (no network, or a word it doesn't have), a downloaded
+  dictionary in the lookup language answers in its place (WordNet first, for English), and the
+  section says which. **Offline only** uses downloaded dictionaries alone, so nothing leaves
+  the computer.
 - **Appearance**: a theme (Default, Paper, Nord, Minimal), light or dark or the system's, accent
   and highlight colours, font, text size, width and height, how many definitions and lines of
   Wikipedia, and which parts show (the Settings… button too), with a live preview.

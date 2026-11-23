@@ -139,7 +139,7 @@ impl WordNet {
         let headword = headword?;
         if meanings.is_empty() { return None; }
         let note = (headword.to_lowercase() != word.trim().to_lowercase()).then(|| format!("from {}", word.trim().to_lowercase()));
-        Some(Definition { headword, phonetic: None, meanings, note, url: String::new() })
+        Some(Definition { headword, phonetic: None, meanings, note, url: String::new(), source: None })
     }
 }
 

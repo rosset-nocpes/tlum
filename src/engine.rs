@@ -241,7 +241,7 @@ fn show(cx: &mut Ctx, display: usize, p: &Pointer, query: String, rect: [f64; 4]
     let thumbnail = |sections: &[dict::Section]| sections.iter().find_map(|s| s.wiki()).and_then(|w| w.thumbnail.clone()).filter(|_| pictures);
     if cached.is_some() { return fetch_thumbnail(&overlay, generation, thumbnail(&sections)); }
     // Each source in parallel; each section fills in as it arrives.
-    let lookup = Arc::new(dict::Lookup::new(&query, &cx.config.language, cx.config.offline));
+    let lookup = Arc::new(dict::Lookup::new(&query, &cx.config.language, cx.config.offline, &sources));
     let results = Arc::new(Mutex::new(sections));
     for (i, id) in sources.into_iter().enumerate() {
         let (overlay, lookup, results, cache, key) = (overlay.clone(), lookup.clone(), results.clone(), cx.cache.clone(), key.clone());

@@ -239,11 +239,16 @@ fn link_name(url: &str) -> &'static str {
 
 /// A section's title row, with its link. `live`: the link opens (the settings' preview draws
 /// the popover without handlers).
-fn section(t: &Theme, label: &str, url: Option<&str>, live: bool) -> El {
+fn section(t: &Theme, label: &str, url: Option<&str>, live: bool) -> El { section_from(t, label, url, None, live) }
+
+/// [`section`], naming the dictionary that answered (`from`) in place of the link.
+fn section_from(t: &Theme, label: &str, url: Option<&str>, from: Option<&str>, live: bool) -> El {
     let f = t.popover.family;
     let mut header = row().w_full().justify_between().center_y();
     if !t.section_title.hidden { header = header.child(txt(&t.section_title, label, f)); } else { header = header.child(el()); }
-    if let Some(url) = url.filter(|_| !t.link.hidden) {
+    if let Some(from) = from.filter(|_| !t.section_title.hidden) {
+        header = header.child(txt(&t.section_title, from, f).max_lines(1).truncate().min_w(0.0).pl(12.0));
+    } else if let Some(url) = url.filter(|_| !t.link.hidden) {
         let mut link = txt(&t.link, format!("{} ↗", link_name(url)), f);
         if live {
             let url = url.to_string();
@@ -268,7 +273,7 @@ fn sense_row(t: &Theme, n: usize, sense: &crate::dict::Sense) -> El {
 
 fn dictionary(t: &Theme, title: &str, d: &Definition, live: bool) -> El {
     let f = t.popover.family;
-    let mut c = col().w_full().gap(8.0).child(section(t, title, (!d.url.is_empty()).then_some(d.url.as_str()), live));
+    let mut c = col().w_full().gap(8.0).child(section_from(t, title, (!d.url.is_empty()).then_some(d.url.as_str()), d.source.as_deref(), live));
     let mut head = row().gap(10.0).center_y();
     if !t.headword.hidden { head = head.child(txt(&t.headword, &d.headword, f)); }
     if let Some(ph) = d.phonetic.as_ref().filter(|_| !t.pronunciation.hidden) {
