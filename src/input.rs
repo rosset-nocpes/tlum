@@ -127,8 +127,9 @@ fn inotify() -> Option<OwnedFd> {
     Some(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-/// Runs forever on the calling thread, reporting effects to `sink`.
-pub fn run(settings: Settings, sink: impl Fn(Effect, &str)) {
+/// Runs forever on the calling thread, reporting effects to `sink`. `settings` gives the
+/// settings in effect, read again before each batch of events.
+pub fn run(settings: impl Fn() -> Settings, sink: impl Fn(Effect, &str)) {
     let start = Instant::now();
     let now = || start.elapsed().as_millis() as u64;
     let mut devices: HashMap<String, Device> = HashMap::new();
@@ -154,6 +155,7 @@ pub fn run(settings: Settings, sink: impl Fn(Effect, &str)) {
             }
         }
         let t = now();
+        let settings = settings();
         let deadline = devices.values().filter_map(|d| match &d.kind {
             Kind::Mouse(m) => m.deadline(&settings), Kind::Touchpad(p) => p.deadline(&settings),
         }).min();

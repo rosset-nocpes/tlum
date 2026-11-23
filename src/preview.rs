@@ -3,14 +3,14 @@
 
 use rune::{AppSpec, Color, Cx, El, Pixels, TextStyle, el, text};
 
-use crate::dict::{Definition, Meaning, Part, Sense, Wiki};
+use crate::dict::{Definition, Entry, Kind, Meaning, Part, Section, Sense, Wiki};
 use crate::style::Rgba;
 use crate::ui::{self, Popover, Shown};
 
 const SIZE: (f32, f32) = (1000.0, 680.0);
 const WORD: [f32; 4] = [452.0, 118.0, 96.0, 24.0];
 
-fn definition() -> Definition {
+pub(crate) fn definition() -> Definition {
     Definition {
         headword: "serendipity".into(),
         phonetic: Some("/ˌsɛɹ.ən.ˈdɪp.ɪ.ti/".into()),
@@ -28,7 +28,7 @@ fn definition() -> Definition {
     }
 }
 
-fn wiki() -> Wiki {
+pub(crate) fn wiki() -> Wiki {
     Wiki {
         title: "Serendipity".into(),
         description: Some("Unplanned fortunate discovery".into()),
@@ -46,11 +46,26 @@ fn marker() -> (Pixels, Pixels) {
     (solid(&themes.0), solid(&themes.1))
 }
 
-fn shown(word: [f32; 4], definition: Part<Definition>, wiki: Part<Wiki>) -> Shown {
+/// The three built-in sections, with these parts (the thesaurus shares the definition).
+pub(crate) fn sections(definition: Part<Definition>, wiki: Part<Wiki>) -> Vec<Section> {
+    let entry = |p: Part<Definition>| match p { Part::Found(d) => Part::Found(Entry::Definition(d)), Part::Loading => Part::Loading, Part::Missing => Part::Missing, Part::Failed(e) => Part::Failed(e) };
+    let wiki = match wiki { Part::Found(w) => Part::Found(Entry::Wiki(w)), Part::Loading => Part::Loading, Part::Missing => Part::Missing, Part::Failed(e) => Part::Failed(e) };
+    vec![
+        Section { id: "dictionary".into(), title: "Dictionary".into(), kind: Kind::Dictionary, part: entry(definition.clone()) },
+        Section { id: "thesaurus".into(), title: "Thesaurus".into(), kind: Kind::Thesaurus, part: entry(definition) },
+        Section { id: "wikipedia".into(), title: "Wikipedia".into(), kind: Kind::Wikipedia, part: wiki },
+    ]
+}
+
+fn set(s: &mut Popover, definition: Part<Definition>, wiki: Part<Wiki>) {
+    if let Some(v) = &mut s.shown { v.sections = sections(definition, wiki); }
+}
+
+pub(crate) fn shown(word: [f32; 4], definition: Part<Definition>, wiki: Part<Wiki>) -> Shown {
     Shown {
         generation: 1, query: "serendipity".into(), word, marker: Some(marker()), screen: [SIZE.0, SIZE.1],
         offset: Some([0.0, 0.0]), area: None, pointer: [word[0] + 20.0, word[1] + 10.0], shown_at: std::time::Instant::now(),
-        definition, wiki, thumbnail: None,
+        sections: sections(definition, wiki), thumbnail: None,
     }
 }
 
@@ -78,9 +93,9 @@ pub fn spec() -> AppSpec<Popover> {
     AppSpec {
         scenes: &[
             ("light", |s| s.force_dark = Some(false)),
-            ("loading", |s| if let Some(v) = &mut s.shown { v.definition = Part::Loading; v.wiki = Part::Loading; }),
-            ("missing", |s| if let Some(v) = &mut s.shown { v.definition = Part::Missing; v.wiki = Part::Missing; }),
-            ("offline", |s| if let Some(v) = &mut s.shown { v.definition = Part::Failed("timed out".into()); v.wiki = Part::Failed("timed out".into()); }),
+            ("loading", |s| set(s, Part::Loading, Part::Loading)),
+            ("missing", |s| set(s, Part::Missing, Part::Missing)),
+            ("offline", |s| set(s, Part::Failed("timed out".into()), Part::Failed("timed out".into()))),
             ("above", |s| s.shown = Some(shown([452.0, 600.0, 96.0, 24.0], Part::Found(definition()), Part::Found(wiki())))),
             ("edge", |s| s.shown = Some(shown([452.0, 118.0, 96.0, 24.0], Part::Found(definition()), Part::Missing))),
         ],

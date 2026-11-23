@@ -93,6 +93,18 @@ pub fn tessdata_dir(lang: &str) -> Option<String> {
     TESSDATA.iter().find(|d| std::path::Path::new(d).join(format!("{lang}.traineddata")).exists()).map(|d| d.to_string())
 }
 
+/// The Tesseract languages installed (`eng`, `ukr`, …), less the script detector.
+pub fn installed_languages() -> Vec<String> {
+    let mut dirs: Vec<std::path::PathBuf> = TESSDATA.iter().map(std::path::PathBuf::from).collect();
+    if let Some(p) = std::env::var_os("TESSDATA_PREFIX").map(std::path::PathBuf::from) { dirs.insert(0, p.join("tessdata")); dirs.insert(0, p); }
+    let mut v: Vec<String> = dirs.iter().flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten())
+        .filter_map(|e| e.file_name().to_string_lossy().strip_suffix(".traineddata").map(str::to_string))
+        .filter(|l| l != "osd" && l != "equ").collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
 impl Ocr {
     pub fn new(lang: &str) -> Result<Ocr, String> {
         let lib = find_library()?;
