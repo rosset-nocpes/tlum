@@ -633,15 +633,16 @@ mod tests {
     #[test]
     fn the_popover_hangs_below_with_room_and_flips_above_near_the_bottom() {
         let screen = [1920.0, 1080.0];
-        let t = crate::style::theme(false);
-        let (left, below, arrow, room) = place([500.0, 100.0, 60.0, 18.0], screen, &t);
+        let themes = crate::style::themes();
+        let t = &themes.0;
+        let (left, below, arrow, room) = place([500.0, 100.0, 60.0, 18.0], screen, t);
         assert!(below && room >= 260.0);
         assert!((left + arrow + t.arrow.width / 2.0 - 530.0).abs() < 0.01, "arrow points at the word's middle");
-        let (_, below, _, _) = place([500.0, 1000.0, 60.0, 18.0], screen, &t);
+        let (_, below, _, _) = place([500.0, 1000.0, 60.0, 18.0], screen, t);
         assert!(!below);
         // At the screen's edge the panel stays on screen and the arrow follows the word,
         // clear of the panel's rounded corner.
-        let (left, _, arrow, _) = place([2.0, 100.0, 30.0, 18.0], screen, &t);
+        let (left, _, arrow, _) = place([2.0, 100.0, 30.0, 18.0], screen, t);
         assert_eq!(left, EDGE);
         assert_eq!(arrow, t.popover.radius + 2.0);
     }
