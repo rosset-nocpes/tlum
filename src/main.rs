@@ -12,6 +12,7 @@ mod dict;
 mod engine;
 mod gesture;
 mod hypr;
+mod icons;
 mod image;
 mod input;
 mod install;
@@ -48,7 +49,8 @@ USAGE:
     tlum trigger        look up the word under the pointer (bind it to a key anywhere)
     tlum define WORD…   show the popover for WORD at the pointer
     tlum close          close the popover
-    tlum settings       open the settings window (dictionaries, triggers, appearance)
+    tlum quit           stop the daemon
+    tlum settings [PAGE]   open the settings (general, dictionaries, appearance, advanced)
     tlum lookup WORD…   print what the popover would show for WORD
     tlum dictionaries   list installed dictionaries (`available`, `install ID`, `remove ID`)
     tlum install        install to ~/.local/bin, grant KWin screenshots, start at login
@@ -87,6 +89,7 @@ fn main() {
         Some("trigger") => call("Trigger", None),
         Some("define") if args.len() > 1 => call("LookUp", Some(args[1..].join(" "))),
         Some("close") => call("Close", None),
+        Some("quit") => call("Quit", None),
         Some("settings") => { settings::run(args[1..].to_vec()); Ok(()) }
         Some("lookup") if args.len() > 1 => { lookup(&args[1..].join(" ")); Ok(()) }
         Some("dictionaries") => dictionaries_command(&args[1..]),

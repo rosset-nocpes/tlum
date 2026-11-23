@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use rune::{Cx, El, Key, KeyEvent, OverlayHandle, Pixels, ScrollPos, ScrollSpec, Shape, Span, Spring, SpringPair, SurfaceFit, Transition, Tx, canvas, col, el, rich, row, text};
+use rune::{Cx, El, Key, KeyEvent, OverlayHandle, Pixels, ScrollPos, ScrollSpec, Shape, Span, Spring, SpringPair, SurfaceFit, Transition, Tx, canvas, col, el, icon, rich, row, text};
 
 use crate::dict::{Definition, Entry, Kind, Part, Section, Wiki};
 use crate::style::{Text, Theme};
@@ -332,6 +332,30 @@ fn hidden(t: &Theme, s: &Section) -> bool {
     match s.kind { Kind::Dictionary => t.hide_dictionary, Kind::Thesaurus => t.hide_thesaurus, Kind::Wikipedia => t.hide_wikipedia }
 }
 
+/// Opens tlum's settings window (or brings it forward, when it's open).
+pub fn open_settings() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let null = std::process::Stdio::null;
+    match std::process::Command::new(exe).arg("settings").stdin(null()).stdout(null()).spawn() {
+        // Reap it when it closes.
+        Ok(mut child) => { std::thread::spawn(move || child.wait()); }
+        Err(e) => eprintln!("tlum: couldn't open the settings: {e}"),
+    }
+}
+
+/// "Settings…" at the end of the popover, as macOS's Look Up has.
+fn footer(t: &Theme, live: bool) -> El {
+    let f = &t.footer;
+    let mut b = row().key("lu-settings").gap(5.0).center_y().radius(5.0).px(4.0).py(2.0).ml(-4.0).label("Settings").role("button")
+        .child(icon(&crate::icons::GEAR, (f.size + 1.0).round()).color(f.color.color()).a11y_hidden())
+        .child(txt(f, "Settings…", t.popover.family).a11y_hidden());
+    if live {
+        b = b.cursor(rune::Cursor::Pointer).hover(f.color.color().alpha(0.12))
+            .on_press(|s: &mut Popover| { dismiss(s); open_settings(); });
+    }
+    row().w_full().child(b)
+}
+
 /// The sections that have something, in order. Until one does: the word and "Looking up…";
 /// when none has anything: why.
 fn content(t: &Theme, v: &Shown, live: bool) -> El {
@@ -350,7 +374,8 @@ fn content(t: &Theme, v: &Shown, live: bool) -> El {
         };
         if let Some(b) = block { c = add(c, b, any); any = true; }
     }
-    if any { return c; }
+    let with_footer = |c: El| if t.footer.hidden { c } else { add(c, footer(t, live), true) };
+    if any { return with_footer(c); }
     let word = || txt(&t.headword, &v.query, p.family);
     if sections.is_empty() {
         c = add(c, col().w_full().gap(6.0).child(word()).child(status(t, "No dictionaries are turned on. Choose some in tlum's settings.")), false);
@@ -363,7 +388,7 @@ fn content(t: &Theme, v: &Shown, live: bool) -> El {
         for (title, e) in failed { block = block.child(status(t, &format!("Couldn't reach {title} ({e})"))); }
         c = add(c, block, false);
     }
-    c
+    with_footer(c)
 }
 
 /// A popover arrow pointing up (or down), its base overlapping the panel's border so the

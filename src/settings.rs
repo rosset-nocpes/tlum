@@ -13,10 +13,11 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rune::{Align, AppSpec, Color, Cx, Drag, El, FileDialogOptions, Phase, ScrollSpec, Spring, TextEdit, Tx, col, el, row, spacer, text};
-use rune_kit::{Button, ButtonVariant, Checkbox, Kit, Progress, SegmentedControl, Select, Spinner, TextInput};
+use rune::{Align, AppSpec, Color, Cx, Drag, El, FileDialogOptions, Icon, Phase, ScrollSpec, Spring, TextEdit, Transition, Tx, col, el, icon, row, spacer, text};
+use rune_kit::{Button, ButtonVariant, Checkbox, IconButton, IconButtonVariant, Kit, Progress, SegmentedControl, Select, Spinner, TextInput};
 
 use crate::config::{self, Appearance, BUILT_IN, Config, Source};
+use crate::icons;
 use crate::dict::{Part, Section};
 use crate::library::{self, Installed, Offer};
 use crate::style::{self, Theme};
@@ -24,12 +25,17 @@ use crate::style::{self, Theme};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Page { General, Dictionaries, Appearance, Advanced }
 
-const PAGES: [(Page, &str, &str); 4] = [
-    (Page::General, "General", "Turning tlum on, and how you look words up"),
-    (Page::Dictionaries, "Dictionaries", "Where definitions come from, and in what order"),
-    (Page::Appearance, "Appearance", "How the popover looks"),
-    (Page::Advanced, "Advanced", "Reading the screen, diagnostics and resetting"),
+/// Each page: its name, what it's for, its icon and the icon's tile colour.
+const PAGES: [(Page, &str, &str, &Icon, [u8; 3]); 4] = [
+    (Page::General, "General", "Turning tlum on, and how you look words up", &icons::GEAR, [142, 142, 147]),
+    (Page::Dictionaries, "Dictionaries", "Where definitions come from, and in what order", &icons::BOOK, [229, 72, 77]),
+    (Page::Appearance, "Appearance", "How the popover looks", &icons::PALETTE, [10, 132, 255]),
+    (Page::Advanced, "Advanced", "Reading the screen, diagnostics and resetting", &icons::SLIDERS, [99, 99, 102]),
 ];
+
+fn page_named(name: &str) -> Option<Page> {
+    PAGES.iter().find(|p| p.1.eq_ignore_ascii_case(name)).map(|p| p.0)
+}
 
 /// What background work hands back to the window.
 enum Msg {
@@ -49,8 +55,10 @@ pub struct Settings {
     config: Config,
     /// The last save or action that failed.
     error: Option<String>,
-    /// A passing note: "Added …".
-    notice: Option<String>,
+    /// A passing note ("Added …"), and when it came; it hides after a few seconds.
+    notice: Option<(String, Instant)>,
+    /// Stopping or restarting the daemon.
+    busy: bool,
     /// The select that's open.
     open: Option<&'static str>,
     force_dark: Option<bool>,
@@ -97,7 +105,7 @@ impl Settings {
         }).collect();
         let own_shortcut = matches!(crate::desktop::kind(&config.backend, zbus::blocking::Connection::session().ok().as_ref()), crate::desktop::Kind::KWin | crate::desktop::Kind::X11);
         Settings {
-            page: Page::General, shortcut: TextEdit::new(config.shortcut.clone()), config, error, notice: None, open: None, force_dark: None,
+            page: Page::General, shortcut: TextEdit::new(config.shortcut.clone()), config, error, notice: None, busy: false, open: None, force_dark: None,
             installed: library::installed(), catalog: None, search: TextEdit::new(""), downloads: Arc::default(), cancelled: Arc::default(), reorder: None,
             running: None, checked_at: None,
             own_shortcut,
@@ -129,6 +137,8 @@ impl Settings {
         self.themes = (l, d);
         self.css_warnings = w;
     }
+
+    fn note(&mut self, m: impl Into<String>) { self.notice = Some((m.into(), Instant::now())); }
 
     fn set(&mut self, f: impl FnOnce(&mut Config)) {
         f(&mut self.config);
@@ -193,23 +203,25 @@ fn poll(s: &mut Settings, _: f64, tx: &mut Tx) -> bool {
                 s.downloads.lock().unwrap().remove(&id);
                 s.cancelled.lock().unwrap().remove(&id);
                 match r {
-                    Ok(()) => { s.refresh_installed(); s.notice = Some(format!("Installed {}.", name_of(s, &id))); }
+                    Ok(()) => { s.refresh_installed(); s.note(format!("Installed {}.", name_of(s, &id))); }
                     Err(e) if e == "cancelled" => {}
                     Err(e) => { s.downloads.lock().unwrap().insert(id, Err(e)); }
                 }
             }
             Msg::Added(r) => match r {
-                Ok(id) => { s.refresh_installed(); s.notice = Some(format!("Added {}.", name_of(s, &id))); }
+                Ok(id) => { s.refresh_installed(); s.note(format!("Added {}.", name_of(s, &id))); }
                 Err(e) => s.error = Some(e),
             },
             Msg::Doctor(out) => s.doctor = Some(out),
-            Msg::Running(on) => s.running = Some(on),
+            Msg::Running(on) => { s.running = Some(on); s.busy = false; }
         }
     }
     // Downloads report progress through the shared map; redraw while any runs.
     if s.downloads.lock().unwrap().values().any(|d| d.is_ok()) { changed = true; tx.wake_after(Duration::from_millis(250)); }
+    if s.notice.as_ref().is_some_and(|n| n.1.elapsed() > Duration::from_secs(4)) { s.notice = None; changed = true; }
+    if s.notice.is_some() { tx.wake_after(Duration::from_secs(1)); }
     // Whether the daemon runs, every few seconds.
-    if s.checked_at.is_none_or(|t| t.elapsed() > Duration::from_secs(3)) { s.check_running(); }
+    if !s.busy && s.checked_at.is_none_or(|t| t.elapsed() > Duration::from_secs(3)) { s.check_running(); }
     tx.wake_after(Duration::from_secs(3));
     changed
 }
@@ -231,7 +243,7 @@ fn accent(dark: bool) -> Color { rune::tok::accent(0, dark) }
 
 fn rgb(r: u8, g: u8, b: u8) -> Color { style::Rgba([r, g, b, 255]).color() }
 
-fn title(k: &Kit, s: &str) -> El { text(s).font(k.ty.body_medium).color(k.c.text_strong) }
+fn title(k: &Kit, s: &str) -> El { text(s).font(k.ty.body_medium).color(k.c.text_strong).wrap() }
 fn detail(k: &Kit, s: &str) -> El { text(s).font(k.ty.text_small).color(k.c.text_weak).wrap() }
 
 /// A rounded group of rows with hairlines between them, under an optional heading.
@@ -286,7 +298,7 @@ fn select(k: &Kit, layer: &mut Vec<El>, s: &Settings, key: &'static str, label: 
 #[allow(clippy::too_many_arguments)]
 fn slider(k: &Kit, key: &str, label: &str, value: f32, (min, max, step): (f32, f32, f32), show: String,
           get: fn(&Settings) -> f32, set: fn(&mut Settings, f32)) -> El {
-    let (w, h, knob, bar) = (170.0, 22.0, 18.0, 4.0);
+    let (w, h, knob, bar) = (150.0, 22.0, 18.0, 4.0);
     let travel = w - knob;
     let frac = ((value - min) / (max - min)).clamp(0.0, 1.0);
     let snap = move |v: f32| ((v - min) / step).round() * step + min;
@@ -305,7 +317,7 @@ fn slider(k: &Kit, key: &str, label: &str, value: f32, (min, max, step): (f32, f
         .child(el().size(knob / 2.0 + frac * travel, bar).absolute(0.0, (h - bar) / 2.0).radius(bar / 2.0).fill(accent(dark)).a11y_hidden())
         .child(el().size(knob, knob).absolute(frac * travel, (h - knob) / 2.0).radius(knob / 2.0).fill(k.c.knob)
             .shadow(1.0, 3.0, Color::BLACK.alpha(0.3)).a11y_hidden());
-    let readout = text(show).font(k.ty.text_small).color(k.c.text_weak).w(64.0).align(Align::End).a11y_hidden();
+    let readout = text(show).font(k.ty.text_small).color(k.c.text_weak).w(52.0).align(Align::End).a11y_hidden();
     setting(k, key, label, None, row().gap(10.0).center_y().child(control).child(readout))
 }
 
@@ -319,7 +331,7 @@ fn view(s: &Settings, cx: &mut Cx<Settings>) -> El {
     let dark = s.force_dark.unwrap_or_else(|| cx.system_dark());
     let k = Kit::neutral(dark);
     let mut layer = Vec::new();
-    let (_, heading, about) = PAGES.iter().find(|p| p.0 == s.page).copied().unwrap();
+    let (_, heading, about, _, _) = PAGES.iter().find(|p| p.0 == s.page).copied().unwrap();
     let body = match s.page {
         Page::General => general(s, &k, &mut layer),
         Page::Dictionaries => dictionaries(s, &k, &mut layer),
@@ -332,48 +344,80 @@ fn view(s: &Settings, cx: &mut Cx<Settings>) -> El {
             .child(text(e).font(k.ty.text_small).color(k.c.danger.fg).wrap().grow(1.0).min_w(0.0))
             .child(Button::new("Dismiss").variant(ButtonVariant::Ghost).on_press(|s: &mut Settings| s.error = None).build(&k)));
     }
-    if let Some(n) = &s.notice {
-        banner = banner.child(row().w_full().px(12.0).py(8.0).radius(8.0).fill(k.c.success.bg).gap(8.0).center_y()
-            .child(text(n).font(k.ty.text_small).color(k.c.success.fg).wrap().grow(1.0).min_w(0.0))
-            .child(Button::new("OK").variant(ButtonVariant::Ghost).on_press(|s: &mut Settings| s.notice = None).build(&k)));
+    let max = if s.page == Page::Appearance { 10_000.0 } else { 720.0 };
+    let header = col().w_full().max_w(max).px(28.0).pt(26.0).pb(16.0).gap(3.0)
+        .child(text(heading).font(rune::TextStyle::new(24.0, 700.0).tracking(-0.3)).color(k.c.text_strong))
+        .child(text(about).font(k.ty.ui).color(k.c.text_weak))
+        .child(banner.pt(8.0));
+    let mut main = col().key("main").grow(1.0).min_w(0.0).h_full().fill(k.c.bg_base).items_center().child(header).child(body);
+    // A passing note floats over the bottom of the page and fades away.
+    if let Some((n, _)) = &s.notice {
+        let toast = row().key(format!("toast-{n}")).gap(8.0).center_y().px(14.0).py(9.0).radius(999.0)
+            .fill(k.c.surface_float).border(1.0, k.c.border_weak).shadow(6.0, 24.0, Color::BLACK.alpha(0.22))
+            .transition(Transition::opacity())
+            .child(icon(&icons::CHECK, 14.0).color(k.c.success.fg).a11y_hidden())
+            .child(text(n).font(k.ty.ui_medium).color(k.c.text_strong).single_line())
+            .role("status").label(n.clone());
+        main = main.child(row().w_full().justify_center().pin(Some(0.0), None, Some(0.0), Some(22.0)).child(toast));
     }
-    let header = col().w_full().px(28.0).pt(22.0).pb(14.0).gap(4.0)
-        .child(text(heading).font(rune::TextStyle::new(22.0, 700.0)).color(k.c.text_strong))
-        .child(text(about).font(k.ty.text_small).color(k.c.text_weak))
-        .child(banner.pt(6.0));
-    let main = col().key("main").grow(1.0).min_w(0.0).h_full().fill(k.c.bg_base).child(header).child(body);
     rune_kit::root(row().w_full().h_full().child(sidebar(s, &k)).child(main), layer)
 }
 
 fn sidebar(s: &Settings, k: &Kit) -> El {
-    let mut c = col().key("sidebar").w(196.0).h_full().fill(k.c.bg_deep).border(0.0, k.c.border_weak).pt(20.0).px(10.0).gap(2.0)
-        .child(row().px(10.0).pb(14.0).gap(8.0).center_y()
-            .child(el().size(22.0, 22.0).radius(6.0).fill(rgb(255, 219, 66))
-                .child(text("Aa").font(rune::TextStyle::new(11.0, 700.0)).color(rgb(34, 28, 5)).w_full().align(Align::Center).pt(4.0)))
-            .child(text("tlum").font(rune::TextStyle::new(15.0, 700.0)).color(k.c.text_strong)));
-    for (page, name, _) in PAGES {
+    let mut c = col().key("sidebar").w(214.0).h_full().fill(k.c.bg_deep).pt(22.0).px(10.0).gap(2.0)
+        .child(row().px(8.0).pb(18.0).gap(10.0).center_y()
+            .child(app_tile(30.0))
+            .child(col().gap(0.0)
+                .child(text("tlum").font(rune::TextStyle::new(15.0, 700.0)).color(k.c.text_strong))
+                .child(text("Look Up for Linux").font(k.ty.text_small).color(k.c.text_weak))));
+    let pick = accent(k.dark);
+    for (page, name, _, glyph, color) in PAGES {
         let selected = s.page == page;
-        let mut r = row().key(format!("nav-{name}")).role("tab").label(name).checked(selected).focusable(true).w_full().h(32.0).px(10.0).radius(7.0).center_y()
+        let mut r = row().key(format!("nav-{name}")).role("tab").label(name).checked(selected).focusable(true).w_full().h(34.0).px(8.0).gap(10.0).radius(8.0).center_y()
             .on_press(move |s: &mut Settings| s.go(page))
-            .child(text(name).font(if selected { k.ty.ui_medium } else { k.ty.ui }).color(if selected { k.c.text_strong } else { k.c.text_base }).a11y_hidden());
-        r = if selected { r.fill(k.c.surface_raised_hover) } else { k.interactive(r) };
+            .child(tile_icon(22.0, color, glyph))
+            .child(text(name).font(k.ty.ui_medium).color(if selected { Color::WHITE } else { k.c.text_strong }).a11y_hidden());
+        r = if selected { r.fill(pick) } else { k.interactive(r) };
         c = c.child(r);
     }
-    let status = match s.running {
-        Some(true) => ("● Running", k.c.success.fg),
-        Some(false) => ("● Not running", k.c.text_weak),
-        None => ("", k.c.text_weak),
+    let (dot, label) = match s.running {
+        Some(true) => (k.c.success.fg, "Running"),
+        Some(false) => (k.c.text_faint, "Not running"),
+        None => (Color::TRANSPARENT, ""),
     };
-    c.child(spacer()).child(col().px(10.0).pb(16.0).gap(2.0)
-        .child(text(status.0).font(k.ty.text_small).color(status.1))
+    c.child(spacer()).child(col().px(10.0).pb(16.0).gap(3.0)
+        .child(row().gap(6.0).center_y().child(el().size(7.0, 7.0).radius(4.0).fill(dot)).child(text(label).font(k.ty.text_small).color(k.c.text_weak)))
         .child(text(concat!("Version ", env!("CARGO_PKG_VERSION"))).font(k.ty.text_small).color(k.c.text_faint)))
 }
 
 /// A page's scrolling column of cards.
 fn page(key: &str, children: Vec<El>) -> El {
-    let mut c = col().w_full().px(28.0).pb(32.0).pt(4.0).gap(22.0);
+    page_max(key, 720.0, children)
+}
+
+/// [`page`], at most `max` points wide, centred.
+fn page_max(key: &str, max: f32, children: Vec<El>) -> El {
+    let mut c = col().w_full().max_w(max).px(28.0).pb(40.0).pt(4.0).gap(24.0);
     for ch in children { c = c.child(ch); }
-    col().key(format!("{key}-scroll")).w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).scroll_edge_fade(10.0).child(c)
+    col().key(format!("{key}-scroll")).w_full().grow(1.0).min_h(0.0).items_center().scroll(ScrollSpec { stick_bottom: false }).scroll_edge_fade(10.0).child(c)
+}
+
+/// A rounded tile holding an icon or a few letters, as macOS's settings mark each item.
+fn tile(size: f32, color: Color, inside: El) -> El {
+    el().size(size, size).radius((size * 0.26).round()).fill(color).center().child(inside)
+}
+
+fn tile_icon(size: f32, rgb3: [u8; 3], i: &'static Icon) -> El {
+    tile(size, rgb(rgb3[0], rgb3[1], rgb3[2]), icon(i, (size * 0.62).round()).color(Color::WHITE).a11y_hidden())
+}
+
+fn tile_text(size: f32, rgb3: [u8; 3], s: &str, font: rune::TextStyle) -> El {
+    tile(size, rgb(rgb3[0], rgb3[1], rgb3[2]), text(s).font(font).color(Color::WHITE).single_line().a11y_hidden())
+}
+
+/// tlum's own mark: the word on its yellow highlight.
+fn app_tile(size: f32) -> El {
+    tile(size, rgb(255, 219, 66), text("Aa").font(rune::TextStyle::new((size * 0.46).round(), 700.0)).color(rgb(34, 28, 5)).single_line().a11y_hidden())
 }
 
 // --- General ------------------------------------------------------------------------------------
@@ -382,18 +426,23 @@ const MOUSE_BUTTONS: [(&str, &str); 6] = [("", "None"), ("side", "Side button (b
 
 fn general(s: &Settings, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &s.config;
-    let running = match s.running {
-        Some(true) => setting(k, "daemon", "tlum is running", Some("Changes here apply to it right away."), el()),
-        Some(false) => setting(k, "daemon", "tlum isn't running", Some("Words can't be looked up until it starts."),
-            button(k, "Start tlum", ButtonVariant::Contrast, |s, _| {
-                match std::env::current_exe().and_then(|exe| std::process::Command::new(exe).stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()) {
-                    Ok(_) => { s.running = None; s.checked_at = Some(Instant::now() - Duration::from_secs(2)); }
-                    Err(e) => s.error = Some(format!("Couldn't start tlum: {e}")),
-                }
-            })),
-        None => setting(k, "daemon", "Checking whether tlum is running…", None, Spinner::new().build(k)),
+    let (status, about) = match (s.busy, s.running) {
+        (true, _) => ("Working…", "One moment."),
+        (_, Some(true)) => ("tlum is running", "Changes you make here apply right away."),
+        (_, Some(false)) => ("tlum isn't running", "Words can't be looked up until it starts."),
+        (_, None) => ("Checking…", ""),
     };
+    let controls = match (s.busy, s.running) {
+        (true, _) | (_, None) => row().child(Spinner::new().build(k)),
+        (_, Some(true)) => row().gap(8.0)
+            .child(button(k, "Stop", ButtonVariant::Ghost, |s, _| restart(s, false)))
+            .child(button(k, "Restart", ButtonVariant::Neutral, |s, _| restart(s, true))),
+        (_, Some(false)) => row().child(button(k, "Start tlum", ButtonVariant::Contrast, |s, _| restart(s, true))),
+    };
+    let mut words = col().grow(1.0).min_w(0.0).gap(2.0).child(text(status).font(rune::TextStyle::new(15.0, 650.0)).color(k.c.text_strong));
+    if !about.is_empty() { words = words.child(detail(k, about)); }
+    let running = row().key("daemon").w_full().px(14.0).py(14.0).gap(14.0).center_y()
+        .child(app_tile(44.0)).child(words).child(controls);
     let login = toggle(k, "login", "Open at login", Some("Start tlum when you log in, so it's always ready."), s.autostart, |s| {
         match crate::install::set_autostart(!s.autostart) {
             Ok(()) => s.autostart = !s.autostart,
@@ -448,6 +497,25 @@ fn general(s: &Settings, k: &Kit, layer: &mut Vec<El>) -> El {
     ])
 }
 
+/// Stops the daemon, and starts it again when `start`.
+fn restart(s: &mut Settings, start: bool) {
+    s.busy = true;
+    s.spawn(move || {
+        if daemon_running() {
+            let _ = crate::call("Quit", None);
+            for _ in 0..40 { if !daemon_running() { break; } std::thread::sleep(Duration::from_millis(50)); }
+        }
+        if start {
+            let null = std::process::Stdio::null;
+            if let Ok(mut child) = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).stdin(null()).stdout(null()).stderr(null()).spawn()) {
+                std::thread::spawn(move || child.wait());
+            }
+            for _ in 0..60 { if daemon_running() { break; } std::thread::sleep(Duration::from_millis(50)); }
+        }
+        Msg::Running(daemon_running())
+    });
+}
+
 // --- Dictionaries -------------------------------------------------------------------------------
 
 const ROW: f32 = 58.0;
@@ -482,7 +550,7 @@ fn source_row(s: &Settings, k: &Kit, i: usize, src: &Source) -> El {
             s.set(|c| c.dictionaries = list);
         }).build(k);
     let grip = el().key("grip").size(22.0, ROW).center().cursor(rune::Cursor::Grab).label(format!("Move {name}")).role("button")
-        .child(text("⋮⋮").font(rune::TextStyle::new(14.0, 700.0)).color(k.c.text_faint).a11y_hidden())
+        .child(icon(&icons::GRIP, 16.0).color(k.c.text_faint).a11y_hidden())
         .on_drag(move |s: &mut Settings, d: &mut Drag, tx| {
             let n = s.config.sources().len();
             match d.phase {
@@ -505,17 +573,20 @@ fn source_row(s: &Settings, k: &Kit, i: usize, src: &Source) -> El {
         });
     let mut words = col().grow(1.0).min_w(0.0).gap(2.0).child(title(k, &name).opacity(if off { 0.5 } else { 1.0 }));
     if !about.is_empty() { words = words.child(text(about).font(k.ty.text_small).color(k.c.text_weak).truncate()); }
-    let mut r = row().key(format!("src-{}", src.id)).w_full().h(ROW).pl(6.0).pr(14.0).gap(10.0).center_y()
-        .child(grip).child(check).child(words);
+    let mut r = row().key(format!("src-{}", src.id)).w_full().h(ROW).pl(4.0).pr(10.0).gap(10.0).center_y()
+        .child(grip).child(check).child(source_badge(&src.id, installed).opacity(if off { 0.45 } else { 1.0 })).child(words);
     if installed.is_some() {
         let id = src.id.clone();
-        r = r.child(button(k, "Remove", ButtonVariant::Ghost, move |s, _| {
-            match library::remove(&id) {
-                Ok(()) => { s.notice = Some(format!("Removed {}.", name_of(s, &id))); s.refresh_installed(); }
-                Err(e) => s.error = Some(format!("Couldn't remove it: {e}")),
-            }
-        }));
+        r = r.child(IconButton::new(&icons::TRASH).label(format!("Remove {name}")).help("Remove this dictionary").variant(IconButtonVariant::Ghost)
+            .on_press(move |s: &mut Settings| {
+                match library::remove(&id) {
+                    Ok(()) => { s.note(format!("Removed {}.", name_of(s, &id))); s.refresh_installed(); }
+                    Err(e) => s.error = Some(format!("Couldn't remove it: {e}")),
+                }
+            }).build(k));
     }
+    // A hairline above every row but the first.
+    if i > 0 { r = r.child(el().h(1.0).fill(k.c.border_weak).pin(Some(62.0), Some(0.0), Some(0.0), None).a11y_hidden()); }
     // Dragging: the row follows the pointer over the others, which step aside.
     if let Some(rd) = s.reorder {
         if rd.from == i {
@@ -531,12 +602,48 @@ fn source_row(s: &Settings, k: &Kit, i: usize, src: &Source) -> El {
     r
 }
 
+/// A source's tile: what kind it is at a glance, or its languages.
+fn source_badge(id: &str, installed: Option<&Installed>) -> El {
+    let small = rune::TextStyle::new(10.0, 750.0);
+    match id {
+        "dictionary" => tile_icon(30.0, [229, 72, 77], &icons::BOOK),
+        "thesaurus" => tile_text(30.0, [247, 107, 21], "≈", rune::TextStyle::new(18.0, 700.0)),
+        "wikipedia" => tile_text(30.0, [110, 110, 115], "W", rune::TextStyle::new(16.0, 600.0).family(rune::Family::Named("serif"))),
+        "wordnet" => tile_text(30.0, [48, 164, 108], "WN", small),
+        _ => match id.strip_prefix("freedict-").and_then(|p| p.split_once('-')) {
+            Some((from, to)) => tile(30.0, rgb(0, 144, 255), col().items_center().gap(0.0)
+                .child(text(two(from)).font(small).color(Color::WHITE).single_line())
+                .child(text(two(to)).font(rune::TextStyle::new(8.0, 600.0)).color(Color::WHITE.alpha(0.85)).single_line()).a11y_hidden()),
+            None => match installed {
+                Some(_) => tile_icon(30.0, [142, 78, 198], &icons::BOOK),
+                None => tile_icon(30.0, [142, 142, 147], &icons::BOOK),
+            },
+        },
+    }
+}
+
+/// A language's two-letter mark: `deu` → `DE`, `ces` → `CS`.
+fn two(code: &str) -> String {
+    let iso1 = match code {
+        "afr" => "af", "ara" => "ar", "ast" => "ast", "bre" => "br", "bul" => "bg", "cat" => "ca", "ces" => "cs", "ckb" => "ckb",
+        "cym" => "cy", "dan" => "da", "deu" => "de", "ell" => "el", "eng" => "en", "epo" => "eo", "fin" => "fi", "fra" => "fr",
+        "gla" => "gd", "gle" => "ga", "hin" => "hi", "hrv" => "hr", "hun" => "hu", "ind" => "id", "isl" => "is", "ita" => "it",
+        "jpn" => "ja", "kmr" => "kmr", "kur" => "ku", "lat" => "la", "lit" => "lt", "mkd" => "mk", "mlg" => "mg", "nld" => "nl",
+        "nno" => "nn", "nob" => "nb", "nor" => "no", "oci" => "oc", "pol" => "pl", "por" => "pt", "ron" | "rom" => "ro",
+        "rus" => "ru", "san" => "sa", "slk" => "sk", "slv" => "sl", "spa" => "es", "srp" => "sr", "swe" => "sv", "swh" => "sw",
+        "tur" => "tr", "ukr" => "uk", "wol" => "wo", "zho" => "zh",
+        other => other,
+    };
+    iso1.chars().take(3).collect::<String>().to_uppercase()
+}
+
 fn offer_row(s: &Settings, k: &Kit, o: &Offer) -> El {
     let installed = s.installed.iter().any(|d| d.id == o.id);
     let state = s.downloads.lock().unwrap().get(&o.id).cloned();
     let size = if o.size > 0 { format!(" · {}", library::human_size(o.size)) } else { String::new() };
     let words = col().grow(1.0).min_w(0.0).gap(2.0).child(title(k, &o.name))
         .child(text(format!("{}{size}", o.detail)).font(k.ty.text_small).color(k.c.text_weak).truncate());
+    let badge = source_badge(&o.id, None);
     let id = o.id.clone();
     let control = match (installed, state) {
         (_, Some(Ok((got, total)))) => row().gap(8.0).center_y()
@@ -548,13 +655,15 @@ fn offer_row(s: &Settings, k: &Kit, o: &Offer) -> El {
                 .child(text(e).font(k.ty.text_small).color(k.c.danger.fg).w(160.0).truncate())
                 .child(button(k, "Retry", ButtonVariant::Neutral, move |s, _| download(s, offer.clone())))
         }
-        (true, None) => row().gap(6.0).center_y().child(text("✓ Installed").font(k.ty.text_small).color(k.c.text_weak)),
+        (true, None) => row().gap(5.0).center_y().pr(6.0)
+            .child(icon(&icons::CHECK, 14.0).color(k.c.success.fg).a11y_hidden())
+            .child(text("Installed").font(k.ty.text_small).color(k.c.text_weak)),
         (false, None) => {
             let offer = o.clone();
-            row().child(button(k, "Download", ButtonVariant::Neutral, move |s, _| download(s, offer.clone())))
+            row().child(Button::new("Get").icon(&icons::DOWNLOAD).on_press(move |s: &mut Settings| download(s, offer.clone())).build(k))
         }
     };
-    row().key(format!("offer-{}", o.id)).w_full().min_h(52.0).px(14.0).py(8.0).gap(12.0).center_y().child(words).child(control)
+    row().key(format!("offer-{}", o.id)).w_full().min_h(54.0).px(14.0).py(8.0).gap(12.0).center_y().child(badge).child(words).child(control)
 }
 
 fn download(s: &mut Settings, offer: Offer) {
@@ -574,7 +683,7 @@ fn download(s: &mut Settings, offer: Offer) {
 }
 
 fn add_local(s: &mut Settings, path: std::path::PathBuf) {
-    s.notice = Some(format!("Adding {}…", path.display()));
+    s.note(format!("Adding {}…", path.display()));
     s.spawn(move || Msg::Added(library::add_local(&path)));
 }
 
@@ -585,7 +694,7 @@ fn dictionaries(s: &Settings, k: &Kit, layer: &mut Vec<El>) -> El {
     let order = col().key("order").w_full().gap(8.0)
         .child(text("Sources").font(k.ty.small_medium).color(k.c.text_weak).pl(4.0))
         .child(list)
-        .child(detail(k, "Tick the ones the popover should show; drag ⋮⋮ to change their order.").pl(4.0));
+        .child(detail(k, "Tick the ones the popover shows, and drag them by their handle into the order it shows them in.").pl(4.0));
 
     let lang = s.config.language.clone();
     let lang_name = LANGUAGES.iter().find(|l| l.0 == lang).map_or(lang.clone(), |l| l.1.to_string());
@@ -603,16 +712,16 @@ fn dictionaries(s: &Settings, k: &Kit, layer: &mut Vec<El>) -> El {
     let mut get = col().key("get").w_full().gap(8.0)
         .child(row().w_full().pl(4.0).center_y().gap(8.0)
             .child(text("Download dictionaries").font(k.ty.small_medium).color(k.c.text_weak).grow(1.0))
-            .child(button(k, "Add from File…", ButtonVariant::Ghost, |_, tx| {
+            .child(Button::new("Add from File…").icon(&icons::PLUS).variant(ButtonVariant::Ghost).on_press_tx(|_: &mut Settings, tx| {
                 let o = FileDialogOptions { title: "Add a StarDict dictionary".into(), ..Default::default() }
                     .filter("StarDict dictionary (.ifo or an archive)", &["ifo", "gz", "tgz", "xz", "bz2", "zst", "tar"]);
                 tx.open_file(o, |s: &mut Settings, r, _| match r { Ok(Some(p)) => add_local(s, p), Ok(None) => {}, Err(e) => s.error = Some(format!("No file dialog: {e}")) });
-            }))
-            .child(button(k, "Add Folder…", ButtonVariant::Ghost, |_, tx| {
+            }).build(k))
+            .child(Button::new("Add Folder…").icon(&icons::FOLDER).variant(ButtonVariant::Ghost).on_press_tx(|_: &mut Settings, tx| {
                 let o = FileDialogOptions { title: "Add a StarDict dictionary folder".into(), ..Default::default() };
                 tx.open_folder(o, |s: &mut Settings, r, _| match r { Ok(Some(p)) => add_local(s, p), Ok(None) => {}, Err(e) => s.error = Some(format!("No folder dialog: {e}")) });
-            })));
-    let search = TextInput::new(&s.search).label("Search dictionaries").placeholder("Filter by language, such as German or Ukrainian").width(None)
+            }).build(k)));
+    let search = TextInput::new(&s.search).label("Search dictionaries").placeholder("Filter by language, such as German or Ukrainian").width(None).leading_icon(&icons::SEARCH)
         .on_edit(|s: &mut Settings| &mut s.search).build(k);
     let mut rows = vec![row().w_full().px(10.0).py(10.0).child(search)];
     match &s.catalog {
@@ -762,6 +871,7 @@ fn appearance(s: &Settings, k: &Kit, layer: &mut Vec<El>, system_dark: bool) -> 
         toggle(k, "marker", "Highlight the word", None, shows(!t.marker.hidden), |s| { let on = !s.themes.0.marker.hidden; s.set(|c| c.appearance.marker = Some(!on)); }),
         toggle(k, "arrow", "Arrow to the word", None, shows(!t.arrow.hidden), |s| { let on = !s.themes.0.arrow.hidden; s.set(|c| c.appearance.arrow = Some(!on)); }),
         toggle(k, "animations", "Animations", Some("The popover grows in and the highlight pops."), t.popover.animate, |s| { let on = s.themes.0.popover.animate; s.set(|c| c.appearance.animations = Some(!on)); }),
+        toggle(k, "footer", "Settings button", Some("“Settings…” at the end of the popover, which opens this window."), !t.footer.hidden, |s| { let on = !s.themes.0.footer.hidden; s.set(|c| c.appearance.footer = Some(!on)); }),
     ]);
 
     let path = style::user_path();
@@ -790,10 +900,10 @@ fn appearance(s: &Settings, k: &Kit, layer: &mut Vec<El>, system_dark: bool) -> 
     let css_card = card(k, "custom", Some("Advanced styling"), css_rows);
     let reset = row().pl(4.0).child(button(k, "Reset Appearance", ButtonVariant::Outline, |s, _| s.set(|c| c.appearance = Appearance::default())));
 
-    let controls = page("appearance", vec![theme_card, size_card, content_card, css_card, reset]);
+    let controls = page_max("appearance", 640.0, vec![theme_card, size_card, content_card, css_card, reset]);
     row().w_full().grow(1.0).min_h(0.0).gap(0.0)
-        .child(col().grow(1.0).min_w(360.0).h_full().child(controls))
-        .child(col().h_full().pr(24.0).pb(24.0).pt(4.0).child(preview(s, k, system_dark)))
+        .child(col().grow(1.0).min_w(380.0).h_full().child(controls))
+        .child(col().h_full().pr(28.0).pb(28.0).pt(4.0).child(preview(s, k, system_dark)))
 }
 
 // --- Advanced -----------------------------------------------------------------------------------
@@ -859,7 +969,7 @@ fn advanced(s: &Settings, k: &Kit, layer: &mut Vec<El>) -> El {
             if s.confirm_reset {
                 row().gap(8.0)
                     .child(button(k, "Cancel", ButtonVariant::Ghost, |s, _| s.confirm_reset = false))
-                    .child(button(k, "Reset", ButtonVariant::Danger, |s, _| { s.confirm_reset = false; s.config = Config::default(); s.shortcut = TextEdit::new(s.config.shortcut.clone()); s.save(); s.notice = Some("Settings reset.".into()); }))
+                    .child(button(k, "Reset", ButtonVariant::Danger, |s, _| { s.confirm_reset = false; s.config = Config::default(); s.shortcut = TextEdit::new(s.config.shortcut.clone()); s.save(); s.note("Settings reset."); }))
             } else {
                 button(k, "Reset…", ButtonVariant::Outline, |s, _| s.confirm_reset = true)
             }),
@@ -892,7 +1002,43 @@ pub fn spec() -> AppSpec<Settings> {
     }
 }
 
-pub fn run(args: Vec<String>) {
-    rune::set_app_id("dev.tlum.Settings");
-    rune::App::new(spec()).args(args).run();
+const BUS_NAME: &str = "dev.tlum.Settings";
+const BUS_PATH: &str = "/dev/tlum/Settings";
+
+/// The open window's D-Bus face: a second `tlum settings` (or the popover's "Settings…")
+/// brings it forward instead of opening another.
+struct Window { handle: rune::AppHandle<Settings> }
+
+#[zbus::interface(name = "dev.tlum.Settings")]
+impl Window {
+    /// Shows the window, on `page` when it names one.
+    fn show(&self, page: String) {
+        if let Some(p) = page_named(&page) { self.handle.update(move |s, _| s.go(p)); }
+        self.handle.open();
+    }
+}
+
+/// `tlum settings [PAGE] [rune flags]`.
+pub fn run(mut args: Vec<String>) {
+    let page = args.first().filter(|a| !a.starts_with('-')).and_then(|a| page_named(a));
+    if page.is_some() || args.first().is_some_and(|a| !a.starts_with('-')) { args.remove(0); }
+    // Headless runs (`--snap`, `--tree`, …) stand alone.
+    let headless = !args.is_empty();
+    let bus = if headless { None } else { zbus::blocking::Connection::session().ok() };
+    if let Some(c) = &bus {
+        match c.request_name_with_flags(BUS_NAME, zbus::fdo::RequestNameFlags::DoNotQueue.into()) {
+            Ok(zbus::fdo::RequestNameReply::PrimaryOwner) | Err(_) => {}
+            Ok(_) => {
+                let shown = zbus::blocking::Proxy::new(c, BUS_NAME, BUS_PATH, BUS_NAME)
+                    .and_then(|p| p.call::<_, _, ()>("Show", &(page.map_or("", |p| PAGES.iter().find(|x| x.0 == p).unwrap().1),)));
+                if shown.is_ok() { return; }
+            }
+        }
+    }
+    rune::set_app_id(BUS_NAME);
+    let app = rune::App::new(spec()).args(args);
+    let handle = app.handle();
+    if let Some(p) = page { handle.update(move |s, _| s.go(p)); }
+    if let Some(c) = &bus { let _ = c.object_server().at(BUS_PATH, Window { handle }); }
+    app.run();
 }

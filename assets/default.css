@@ -23,6 +23,7 @@
  *   .thumbnail      the Wikipedia picture: size, border-radius, display
  *   .rule           the line between sections: background, height, display
  *   .status         "Looking up…", "No entries found", errors
+ *   .footer         "Settings…" at the end, which opens tlum's settings
  *   .dictionary  .thesaurus  .wikipedia   display: none hides a whole section
  *
  * Also: :root { --name: value } with var(--name, fallback), and
@@ -100,3 +101,4 @@
 
 .rule { background: var(--rule); height: 1px; }
 .status { color: var(--secondary); font-size: 13px; line-height: 18px; }
+.footer { color: var(--secondary); font-size: 12px; font-weight: 500; }

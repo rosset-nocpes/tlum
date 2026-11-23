@@ -87,6 +87,8 @@ pub struct Appearance {
     pub marker: Option<bool>,
     pub arrow: Option<bool>,
     pub animations: Option<bool>,
+    /// "Settings…" at the end of the popover.
+    pub footer: Option<bool>,
 }
 
 impl Default for Appearance {
@@ -94,7 +96,7 @@ impl Default for Appearance {
         Appearance {
             theme: "default".into(), scheme: "system".into(), accent: None, highlight: None, font: None, text_scale: 1.0,
             width: None, max_height: None, senses: None, wiki_lines: None,
-            pronunciation: None, examples: None, pictures: None, marker: None, arrow: None, animations: None,
+            pronunciation: None, examples: None, pictures: None, marker: None, arrow: None, animations: None, footer: None,
         }
     }
 }

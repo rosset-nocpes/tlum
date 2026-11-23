@@ -19,7 +19,7 @@ compositors, Hyprland, niri, and X11.
 
 If a phrase is selected (*New York*), triggering on one of its words looks up the whole phrase.
 In the popover, **Escape** or a click outside closes it, **Enter** opens the dictionary entry,
-and **Ctrl+C** copies the word.
+**Ctrl+C** copies the word, and **Settings…** at its end opens tlum's settings.
 
 ## Install
 
@@ -57,7 +57,8 @@ KDE, GNOME and X11 need nothing more. Elsewhere, start tlum and bind `tlum trigg
 tlum                 run the daemon
 tlum trigger         look up the word under the pointer
 tlum define WORD     show the popover for WORD
-tlum settings        open the settings window
+tlum settings [PAGE] open the settings (or bring them forward), e.g. on `dictionaries`
+tlum quit            stop the daemon
 tlum lookup WORD     print what the popover would show for WORD
 tlum dictionaries    list installed dictionaries (available · install ID · add PATH · remove ID)
 tlum doctor          report the backend, capture, devices and OCR
@@ -73,7 +74,7 @@ tlum style --init    copy the built-in CSS to edit
 Every change is saved at once, and a running tlum follows it; only a new backend or shortcut
 restarts it.
 
-- **General**: whether tlum is running and opens at login; which gestures look up (force click,
+- **General**: whether tlum is running (with Stop and Restart) and opens at login; which gestures look up (force click,
   three-finger tap, press and hold, and for how long; a mouse button); the keyboard shortcut;
   scrolling direction.
 - **Dictionaries**: the popover's sources, ticked on or off and dragged into the order it shows
@@ -83,7 +84,7 @@ restarts it.
   **Offline only** uses downloaded dictionaries alone, so nothing leaves the computer.
 - **Appearance**: a theme (Default, Paper, Nord, Minimal), light or dark or the system's, accent
   and highlight colours, font, text size, width and height, how many definitions and lines of
-  Wikipedia, and which parts show, with a live preview.
+  Wikipedia, and which parts show (the Settings… button too), with a live preview.
 - **Advanced**: the screen backend, Tesseract's languages, the area read around the pointer,
   diagnostics (`tlum doctor`), and resetting.
 

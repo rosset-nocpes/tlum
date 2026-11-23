@@ -139,6 +139,8 @@ pub struct Theme {
     pub wiki_description: Text,
     pub wiki_extract: Text,
     pub status: Text,
+    /// "Settings…" at the end of the popover.
+    pub footer: Text,
     pub hide_dictionary: bool,
     pub hide_thesaurus: bool,
     pub hide_wikipedia: bool,
@@ -467,6 +469,7 @@ fn apply(t: &mut Theme, selector: &str, prop: &str, v: &str) -> Result<(), Strin
                 ".sense" => &mut t.sense, ".sense-number" => &mut t.sense_number, ".example" => &mut t.example,
                 ".synonyms" => &mut t.synonyms, ".synonyms-label" => &mut t.synonyms_label, ".wiki-title" => &mut t.wiki_title,
                 ".wiki-description" => &mut t.wiki_description, ".wiki-extract" => &mut t.wiki_extract, ".status" => &mut t.status,
+                ".footer" => &mut t.footer,
                 s => return Err(format!("unknown selector {s:?} (see `tlum style --default` for the parts)")),
             };
             match (selector, prop) {
@@ -547,7 +550,7 @@ pub fn appearance_css(a: &Appearance) -> String {
     if let Some(h) = a.max_height { c += &format!(".popover {{ max-height: {}px }}\n", h.clamp(160.0, 1200.0)); }
     if let Some(n) = a.senses { c += &format!(".sense {{ --max-count: {} }}\n", n.clamp(1, 30)); }
     if let Some(n) = a.wiki_lines { c += &format!(".wiki-extract {{ -webkit-line-clamp: {} }}\n", n.clamp(1, 40)); }
-    for (on, selector) in [(a.pronunciation, ".pronunciation"), (a.examples, ".example"), (a.pictures, ".thumbnail"), (a.marker, ".marker"), (a.arrow, ".arrow")] {
+    for (on, selector) in [(a.pronunciation, ".pronunciation"), (a.examples, ".example"), (a.pictures, ".thumbnail"), (a.marker, ".marker"), (a.arrow, ".arrow"), (a.footer, ".footer")] {
         if let Some(on) = on { c += &format!("{selector} {{ display: {} }}\n", if on { "block" } else { "none" }); }
     }
     match a.animations {
@@ -583,7 +586,7 @@ impl Theme {
     pub fn scale_text(&mut self, k: f32) {
         for t in [&mut self.section_title, &mut self.link, &mut self.headword, &mut self.pronunciation, &mut self.note,
                   &mut self.part_of_speech, &mut self.sense, &mut self.sense_number, &mut self.example, &mut self.synonyms,
-                  &mut self.synonyms_label, &mut self.wiki_title, &mut self.wiki_description, &mut self.wiki_extract, &mut self.status] {
+                  &mut self.synonyms_label, &mut self.wiki_title, &mut self.wiki_description, &mut self.wiki_extract, &mut self.status, &mut self.footer] {
             t.size *= k;
             t.line_height *= k;
             t.letter_spacing *= k;
