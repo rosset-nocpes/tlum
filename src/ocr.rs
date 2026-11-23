@@ -83,14 +83,16 @@ fn find_library() -> Result<libloading::Library, String> {
     Err("libtesseract isn't installed (Fedora: tesseract-libs tesseract-langpack-eng; Debian/Ubuntu: libtesseract5 tesseract-ocr-eng; Arch: tesseract tesseract-data-eng)".into())
 }
 
+/// The folder holding the data for `lang`: every language of one like `eng+ukr`.
 pub fn tessdata_dir(lang: &str) -> Option<String> {
+    let has = |dir: &std::path::Path| lang.split('+').filter(|l| !l.is_empty()).all(|l| dir.join(format!("{l}.traineddata")).exists());
     if let Some(prefix) = std::env::var_os("TESSDATA_PREFIX") {
         let p = std::path::PathBuf::from(prefix);
         for dir in [p.clone(), p.join("tessdata")] {
-            if dir.join(format!("{lang}.traineddata")).exists() { return Some(dir.to_string_lossy().into_owned()); }
+            if has(&dir) { return Some(dir.to_string_lossy().into_owned()); }
         }
     }
-    TESSDATA.iter().find(|d| std::path::Path::new(d).join(format!("{lang}.traineddata")).exists()).map(|d| d.to_string())
+    TESSDATA.iter().find(|d| has(std::path::Path::new(d))).map(|d| d.to_string())
 }
 
 /// The Tesseract languages installed (`eng`, `ukr`, …), less the script detector.
