@@ -992,7 +992,11 @@ fn advanced(s: &Settings, k: &Kit, layer: &mut Vec<El>) -> El {
 
     let files = card(k, "files", Some("Files"), vec![
         setting(k, "config-file", "Settings file", Some(&config::config_path().display().to_string()),
-            button(k, "Open", ButtonVariant::Ghost, |s, _| { if let Err(e) = crate::desktop::open_path(&config::config_path()) { s.error = Some(format!("Couldn't open the settings file: {e}")); } })),
+            button(k, "Open", ButtonVariant::Ghost, |s, _| {
+                // Nothing saved yet: write the settings as they are, so there's a file to open.
+                if !config::config_path().exists() { s.save(); }
+                if let Err(e) = crate::desktop::open_path(&config::config_path()) { s.error = Some(format!("Couldn't open the settings file: {e}")); }
+            })),
         setting(k, "dict-folder", "Dictionaries folder", Some(&library::dir().display().to_string()),
             button(k, "Open", ButtonVariant::Ghost, |s, _| {
                 let _ = std::fs::create_dir_all(library::dir());

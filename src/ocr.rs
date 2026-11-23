@@ -163,7 +163,8 @@ impl Ocr {
         let f = library()?;
         let data = tessdata_dir(lang).ok_or_else(|| missing_data(lang).unwrap_or_default())?;
         let c_data = CString::new(data).unwrap();
-        let c_lang = CString::new(lang).map_err(|_| "bad language".to_string())?;
+        // As Tesseract spells it: `eng+ukr`, whatever spaces the setting has.
+        let c_lang = CString::new(languages(lang).collect::<Vec<_>>().join("+")).map_err(|_| "bad language".to_string())?;
         // SAFETY: plain C calls on a handle we own; strings outlive the calls.
         unsafe {
             let api = (f.create)();

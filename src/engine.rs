@@ -74,7 +74,7 @@ struct Ctx {
 enum Reader {
     None,
     Loading(String, std::thread::JoinHandle<Result<Ocr, String>>, Instant),
-    Loaded(String, Result<Ocr, String>, Instant),
+    Loaded(String, Ocr, Instant),
 }
 
 /// How long Tesseract stays loaded after a lookup.
@@ -101,11 +101,11 @@ impl Reader {
             let ocr = handle.join().unwrap_or_else(|_| Err("Tesseract crashed while loading".into()));
             // A failure isn't kept: the next lookup tries again (a language pack installed since).
             let ocr = ocr.inspect_err(|e| eprintln!("tlum: OCR unavailable: {e}"))?;
-            *self = Reader::Loaded(l, Ok(ocr), Instant::now());
+            *self = Reader::Loaded(l, ocr, Instant::now());
         }
         let Reader::Loaded(_, ocr, used) = self else { unreachable!() };
         *used = Instant::now();
-        ocr.as_mut().map_err(|e| e.clone())
+        Ok(ocr)
     }
 
     /// Lets Tesseract go when no lookup has wanted it for `OCR_IDLE`, including one loaded for
