@@ -62,9 +62,24 @@ fn folder_size(dir: &Path) -> u64 {
     std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| e.metadata().ok()).filter(|m| m.is_file()).map(|m| m.len()).sum()
 }
 
-/// Every installed dictionary, by name.
+/// Every installed dictionary, by name. Lookups and the settings ask often, so the list is
+/// kept until the folder changes: installing, adding and removing all rename or delete a
+/// dictionary's folder in it, which moves its modification time, in any process.
 pub fn installed() -> Vec<Installed> {
-    let mut v: Vec<Installed> = std::fs::read_dir(dir()).into_iter().flatten().flatten().filter_map(|e| {
+    static LISTED: Mutex<Option<(std::time::SystemTime, Vec<Installed>)>> = Mutex::new(None);
+    let base = dir();
+    let Ok(stamp) = std::fs::metadata(&base).and_then(|m| m.modified()) else { return Vec::new() };
+    let mut listed = LISTED.lock().unwrap();
+    if let Some((at, v)) = listed.as_ref() && *at == stamp { return v.clone(); }
+    let v = scan_installed(&base);
+    // A stamp from the last moment may yet be shared by a change still under way (timestamps
+    // are coarse): keep only lists of a folder that has been still for a while.
+    *listed = stamp.elapsed().is_ok_and(|age| age > Duration::from_secs(1)).then(|| (stamp, v.clone()));
+    v
+}
+
+fn scan_installed(base: &Path) -> Vec<Installed> {
+    let mut v: Vec<Installed> = std::fs::read_dir(base).into_iter().flatten().flatten().filter_map(|e| {
         let id = e.file_name().to_string_lossy().into_owned();
         if id.starts_with('.') { return None; }
         let meta = std::fs::read_to_string(e.path().join("tlum.json")).ok()?;

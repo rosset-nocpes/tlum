@@ -103,7 +103,7 @@ impl Settings {
             let (l, d, _) = style::build_with(&Appearance { theme: id.to_string(), ..Appearance::default() }, None);
             (l, d)
         }).collect();
-        let own_shortcut = matches!(crate::desktop::kind(&config.backend, zbus::blocking::Connection::session().ok().as_ref()), crate::desktop::Kind::KWin | crate::desktop::Kind::X11);
+        let own_shortcut = matches!(crate::desktop::kind(&config.backend, bus()), crate::desktop::Kind::KWin | crate::desktop::Kind::X11);
         Settings {
             page: Page::General, shortcut: TextEdit::new(config.shortcut.clone()), config, error, notice: None, busy: false, open: None, force_dark: None,
             installed: library::installed(), catalog: None, search: TextEdit::new(""), downloads: Arc::default(), cancelled: Arc::default(), reorder: None,
@@ -171,9 +171,14 @@ impl Settings {
     }
 }
 
+/// The window's session bus connection, opened once: the status check asks every few seconds.
+fn bus() -> Option<&'static zbus::blocking::Connection> {
+    static BUS: std::sync::OnceLock<Option<zbus::blocking::Connection>> = std::sync::OnceLock::new();
+    BUS.get_or_init(|| zbus::blocking::Connection::session().ok()).as_ref()
+}
+
 fn daemon_running() -> bool {
-    zbus::blocking::Connection::session().ok()
-        .and_then(|c| zbus::blocking::fdo::DBusProxy::new(&c).ok().and_then(|d| d.name_has_owner(crate::kwin::SERVICE.try_into().ok()?).ok()))
+    bus().and_then(|c| zbus::blocking::fdo::DBusProxy::new(c).ok().and_then(|d| d.name_has_owner(crate::kwin::SERVICE.try_into().ok()?).ok()))
         .unwrap_or(false)
 }
 
@@ -195,8 +200,16 @@ fn setup(s: &mut Settings, waker: rune::Waker) {
 
 fn poll(s: &mut Settings, _: f64, tx: &mut Tx) -> bool {
     let msgs: Vec<Msg> = std::mem::take(&mut *s.inbox.lock().unwrap());
-    let mut changed = !msgs.is_empty();
+    let mut changed = false;
     for m in msgs {
+        // The status check comes every few seconds and mostly finds nothing new.
+        if let Msg::Running(on) = m {
+            changed |= s.running != Some(on) || s.busy;
+            s.running = Some(on);
+            s.busy = false;
+            continue;
+        }
+        changed = true;
         match m {
             Msg::Catalog(c) => s.catalog = Some(c),
             Msg::Installed(id, r) => {
@@ -213,7 +226,7 @@ fn poll(s: &mut Settings, _: f64, tx: &mut Tx) -> bool {
                 Err(e) => s.error = Some(e),
             },
             Msg::Doctor(out) => s.doctor = Some(out),
-            Msg::Running(on) => { s.running = Some(on); s.busy = false; }
+            Msg::Running(_) => {}
         }
     }
     // Downloads report progress through the shared map; redraw while any runs.
@@ -308,10 +321,19 @@ fn slider(k: &Kit, key: &str, label: &str, value: f32, (min, max, step): (f32, f
         .range_value(f64::from(value), f64::from(min), f64::from(max)).range_step(f64::from(step)).a11y_value(show.clone())
         .on_step(move |s: &mut Settings, steps, _| { let v = (get(s) + steps as f32 * step).clamp(min, max); set(s, v); s.save(); })
         .size(w, h)
-        .on_drag(move |s: &mut Settings, d: &mut Drag, tx| match d.phase {
-            Phase::Down => { d.data = get(s); set(s, at(d.x)); s.restyle(); }
-            Phase::Move => { set(s, at(d.x)); s.restyle(); tx.instant(); }
-            Phase::Up => { if d.cancelled() { set(s, d.data); } s.save(); }
+        .on_drag(move |s: &mut Settings, d: &mut Drag, tx| {
+            // Most moves stay within a step, and most sliders aren't the popover's look: parse
+            // the CSS again only when the appearance changed.
+            let moved = |s: &mut Settings, v: f32| {
+                let was = s.config.appearance.clone();
+                set(s, v);
+                if s.config.appearance != was { s.restyle(); }
+            };
+            match d.phase {
+                Phase::Down => { d.data = get(s); moved(s, at(d.x)); }
+                Phase::Move => { moved(s, at(d.x)); tx.instant(); }
+                Phase::Up => { if d.cancelled() { set(s, d.data); } s.save(); }
+            }
         })
         .child(el().size(w, bar).absolute(0.0, (h - bar) / 2.0).radius(bar / 2.0).fill(k.c.border_base).a11y_hidden())
         .child(el().size(knob / 2.0 + frac * travel, bar).absolute(0.0, (h - bar) / 2.0).radius(bar / 2.0).fill(accent(dark)).a11y_hidden())
@@ -806,7 +828,7 @@ fn theme_tile(s: &Settings, k: &Kit, i: usize, dark: bool) -> El {
 
 /// The sample popover the settings preview: the built-in sections, in the settings' order.
 fn sample(c: &Config) -> crate::ui::Shown {
-    let mut v = crate::preview::shown([0.0, 0.0, 96.0, 24.0], Part::Found(crate::preview::definition()), Part::Found(crate::preview::wiki()));
+    let mut v = crate::preview::unmarked([0.0, 0.0, 96.0, 24.0], Part::Found(crate::preview::definition()), Part::Found(crate::preview::wiki()));
     let all: Vec<Section> = std::mem::take(&mut v.sections);
     let order = c.active_sources();
     v.sections = order.iter().filter_map(|id| all.iter().find(|x| &x.id == id).cloned()).collect();
@@ -1037,8 +1059,8 @@ pub fn run(mut args: Vec<String>) {
     if page.is_some() || args.first().is_some_and(|a| !a.starts_with('-')) { args.remove(0); }
     // Headless runs (`--snap`, `--tree`, …) stand alone.
     let headless = !args.is_empty();
-    let bus = if headless { None } else { zbus::blocking::Connection::session().ok() };
-    if let Some(c) = &bus {
+    let bus = if headless { None } else { bus() };
+    if let Some(c) = bus {
         match c.request_name_with_flags(BUS_NAME, zbus::fdo::RequestNameFlags::DoNotQueue.into()) {
             Ok(zbus::fdo::RequestNameReply::PrimaryOwner) | Err(_) => {}
             Ok(_) => {
@@ -1052,6 +1074,6 @@ pub fn run(mut args: Vec<String>) {
     let app = rune::App::new(spec()).args(args);
     let handle = app.handle();
     if let Some(p) = page { handle.update(move |s, _| s.go(p)); }
-    if let Some(c) = &bus { let _ = c.object_server().at(BUS_PATH, Window { handle }); }
+    if let Some(c) = bus { let _ = c.object_server().at(BUS_PATH, Window { handle }); }
     app.run();
 }

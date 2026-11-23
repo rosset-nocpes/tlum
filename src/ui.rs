@@ -461,7 +461,8 @@ pub fn view(s: &Popover, cx: &mut Cx<Popover>) -> El {
     };
     let Some(v) = &s.shown else { return root };
     let dark = s.force_dark.or_else(|| crate::config::current().appearance.forced_dark()).unwrap_or_else(|| cx.system_dark());
-    let t = crate::style::theme(dark);
+    let themes = crate::style::themes();
+    let t = if dark { &themes.1 } else { &themes.0 };
     let off = offset(s, v);
     let surface = s.size.unwrap_or([v.screen[0] - off[0], v.screen[1] - off[1]]);
     let word = [v.word[0] - off[0], v.word[1] - off[1], v.word[2], v.word[3]];
@@ -471,9 +472,9 @@ pub fn view(s: &Popover, cx: &mut Cx<Popover>) -> El {
         let (x1, y1) = ((a[0] + a[2] - off[0]).min(surface[0]), (a[1] + a[3] - off[1]).min(surface[1]));
         [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)]
     });
-    let (left, below, arrow_x, room) = place([word[0] - fit[0], word[1] - fit[1], word[2], word[3]], [fit[2], fit[3]], &t);
+    let (left, below, arrow_x, room) = place([word[0] - fit[0], word[1] - fit[1], word[2], word[3]], [fit[2], fit[3]], t);
     let left = left + fit[0];
-    let mut pop_el = popover(&t, v, below, arrow_x, room, Some(s.scroll.clone()));
+    let mut pop_el = popover(t, v, below, arrow_x, room, Some(s.scroll.clone()));
     pop_el = if below {
         pop_el.pin(Some(left), Some(word[1] + word[3] + 2.0), None, None)
     } else {

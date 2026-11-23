@@ -261,11 +261,24 @@ fn show(cx: &mut Ctx, display: usize, p: &Pointer, query: String, rect: [f64; 4]
     }
 }
 
+/// Recent pictures, so a word looked up again shows its picture as quickly as its text.
+static THUMBNAILS: Mutex<Vec<(String, Vec<u8>)>> = Mutex::new(Vec::new());
+
+fn thumbnail_bytes(url: &str) -> Option<Vec<u8>> {
+    if let Some((_, b)) = THUMBNAILS.lock().unwrap().iter().find(|(u, _)| u == url) { return Some(b.clone()); }
+    let bytes = dict::get_bytes(url).ok()?;
+    let mut all = THUMBNAILS.lock().unwrap();
+    all.retain(|(u, _)| u != url);
+    all.push((url.to_string(), bytes.clone()));
+    if all.len() > 16 { all.remove(0); }
+    Some(bytes)
+}
+
 fn fetch_thumbnail(overlay: &rune::OverlayHandle<Popover>, generation: u64, url: Option<String>) {
     let Some(url) = url else { return };
     let overlay = overlay.clone();
     std::thread::spawn(move || {
-        let Ok(bytes) = dict::get_bytes(&url) else { return };
+        let Some(bytes) = thumbnail_bytes(&url) else { return };
         overlay.update(move |s: &mut Popover, _| {
             let Some(images) = &s.images else { return };
             let img = images.load(bytes);
